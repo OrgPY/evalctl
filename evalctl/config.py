@@ -80,6 +80,24 @@ def read_pointer(pointer: Path) -> str:
     return data["config"].strip()
 
 
+def resolve_inputs(inputs_arg: Optional[str], pointer: Optional[Path]) -> Optional[Path]:
+    """Where the task's input files are: --inputs, then $EVALCTL_INPUTS, then `inputs:` in .evalctl.yaml
+    (relative to that file). None when nobody said; checks that need inputs then report a setup error."""
+    import os
+
+    raw, base = inputs_arg or os.environ.get("EVALCTL_INPUTS"), Path.cwd()
+    if not raw and pointer is not None:
+        data = _load_yaml(pointer)
+        raw, base = (data.get("inputs") if isinstance(data, dict) else None), pointer.parent
+    if not raw:
+        return None
+    p = Path(str(raw)).expanduser()
+    p = p if p.is_absolute() else base / p
+    if not p.is_dir():
+        raise ConfigError(f"inputs directory not found: {p}")
+    return p.resolve()
+
+
 def _available() -> str:
     d = paths.checks_dir()
     names = sorted(p.stem for p in d.glob("*.yaml")) if d.is_dir() else []

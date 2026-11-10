@@ -39,6 +39,17 @@ CREATE TABLE IF NOT EXISTS runs (
     results TEXT NOT NULL          -- JSON list of per-check results
 );
 CREATE INDEX IF NOT EXISTS runs_dir_config ON runs (dir, config, id);
+CREATE TABLE IF NOT EXISTS feedback (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts REAL NOT NULL,
+    dir TEXT NOT NULL,
+    config TEXT NOT NULL,
+    artifacts_digest TEXT,
+    verdict TEXT NOT NULL,         -- good | bad (the human's judgement)
+    check_status TEXT NOT NULL,    -- pass | fail | error (what the checks said about the same files)
+    failed_checks TEXT NOT NULL,   -- JSON list of check ids
+    note TEXT
+);
 """
 
 
@@ -79,6 +90,50 @@ def record(workdir: Path, config_name: str, config_sha: Optional[str], digest: O
             " source, worker, duration, results) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
             (time.time(), str(workdir), config_name, config_sha, digest, task_id, round_no, status,
              source, worker, duration, json.dumps(results, ensure_ascii=False)))
+
+
+def last_results(workdir: Path, config_name: str, config_sha: str, digest: str) -> Optional[Tuple[str, List[Dict[str, Any]]]]:
+    """(status, per-check results) of the latest run, if it judged exactly these files with this config."""
+    with closing(connect()) as conn:
+        prev = conn.execute(
+            "SELECT * FROM runs WHERE dir=? AND config=? AND status IN ('pass','fail') "
+            "ORDER BY id DESC LIMIT 1", (str(workdir), config_name)).fetchone()
+    if prev is None or prev["artifacts_digest"] != digest or prev["config_sha"] != config_sha:
+        return None
+    return prev["status"], json.loads(prev["results"])
+
+
+def record_feedback(workdir: Path, config_name: str, digest: str, verdict: str, check_status: str,
+                    failed: List[str], note: Optional[str]) -> None:
+    with closing(connect()) as conn, conn:
+        conn.execute(
+            "INSERT INTO feedback (ts, dir, config, artifacts_digest, verdict, check_status, failed_checks, note)"
+            " VALUES (?,?,?,?,?,?,?,?)",
+            (time.time(), str(workdir), config_name, digest, verdict, check_status,
+             json.dumps(failed, ensure_ascii=False), note))
+
+
+def feedback_summary(config_name: Optional[str] = None) -> Dict[str, Dict[str, Any]]:
+    """Per config: how often the human's verdict agreed with the checks, and which checks were overruled."""
+    with closing(connect()) as conn:
+        rows = conn.execute("SELECT * FROM feedback ORDER BY id").fetchall()
+    out: Dict[str, Dict[str, Any]] = {}
+    for r in rows:
+        if config_name and r["config"] != config_name:
+            continue
+        s = out.setdefault(r["config"], {"verdicts": 0, "agree": 0, "checks_too_lenient": 0,
+                                         "checks_too_strict": 0, "overruled": Counter()})
+        s["verdicts"] += 1
+        if r["check_status"] == "pass" and r["verdict"] == "bad":
+            s["checks_too_lenient"] += 1
+        elif r["check_status"] == "fail" and r["verdict"] == "good":
+            s["checks_too_strict"] += 1
+            s["overruled"].update(json.loads(r["failed_checks"]))
+        elif r["check_status"] in ("pass", "fail"):
+            s["agree"] += 1
+    for s in out.values():
+        s["overruled"] = dict(s["overruled"].most_common())
+    return out
 
 
 def stats(only_config: Optional[str] = None) -> Dict[str, Any]:
@@ -151,4 +206,7 @@ def stats(only_config: Optional[str] = None) -> Dict[str, Any]:
             "config_error_runs": errors.get(name, 0),
             "top_failing_checks": [{"id": cid, "failed_rounds": k} for cid, k in s["fails"].most_common(5)],
         }
+    for name, fb in feedback_summary(only_config).items():
+        if name in out["configs"]:
+            out["configs"][name]["feedback"] = fb
     return out

@@ -8,7 +8,7 @@ A small quality gate for AI agent output. The agent runs `evalctl check` before 
 - Check rules live outside the agent's working directory, so the agent cannot edit them.
 - With Claude Code, a Stop hook turns the request into enforcement.
 
-v0 scope: `check`, `verify`, `stats`, one skill, one Stop hook, one example workflow (forum scraping). No proxy, no file watcher, no GUI.
+Scope: `check`, `verify`, `stats`; `learn`, `review`, `feedback` to build a check config from a worked example (v0.5); one skill, one Stop hook, two example workflows. No proxy, no file watcher, no GUI.
 
 ## Install
 
@@ -27,7 +27,9 @@ State lives in `~/.evalctl/`:
 | `checks/<name>.yaml` | check configs |
 | `judge.yaml` | grader models for `llm_rubric` checks |
 | `key` | HMAC signing key, created on the first pass, mode 600 |
-| `runs.sqlite` | log of every check run |
+| `runs.sqlite` | log of every check run and every `feedback` verdict |
+| `learned/<name>.yaml` | candidate checks from `evalctl learn`, waiting for `review` |
+| `feedback/<name>/<time>/draft` | copies of outputs you judged bad although they passed |
 
 ## Try it
 
@@ -58,9 +60,12 @@ The other fixtures: `good` (passes), `missing_field`, `too_few`, `nav_body` (str
 ## Commands
 
 ```text
-evalctl check  [--dir DIR] [--config NAME] [--json] [--worker FAMILY]
+evalctl check  [--dir DIR] [--config NAME] [--inputs DIR] [--json] [--worker FAMILY]
 evalctl verify [--dir DIR] [--config NAME] [--json]
 evalctl stats  [--config NAME] [--json]
+evalctl learn  --draft DIR --final DIR --name NAME [--inputs DIR] [--json]
+evalctl review NAME [--enable ID] [--disable ID] [--yes]
+evalctl feedback --verdict good|bad [--dir DIR] [--note TEXT] [--config NAME] [--inputs DIR] [--json]
 ```
 
 **check.** Picks the config from `--config`, else from the nearest `.evalctl.yaml` in the directory or its parents. Without `--dir`, the directory that holds `.evalctl.yaml` is the one checked, so the command works from a subdirectory. Hard checks run first; `llm_rubric` checks run only when all hard checks pass. Output is a text checklist, or JSON with `--json` (the JSON also carries the text).
@@ -82,7 +87,7 @@ evalctl stats  [--config NAME] [--json]
 
 ## Writing a check config for a new workflow
 
-1. Create `~/.evalctl/checks/<name>.yaml`. Start from `checks/forum_scrape.yaml`.
+1. Create `~/.evalctl/checks/<name>.yaml`. Start from `checks/forum_scrape.yaml`, or let `evalctl learn` draft it (next section).
 2. In the workflow's output directory, create `.evalctl.yaml` with one line: `config: <name>`.
 3. Produce one good output and a few bad ones by hand, and run `evalctl check` on each until the failures read like instructions you would give yourself.
 
@@ -117,6 +122,11 @@ checks:
 | `file` | `path` (glob), `exists` (true), `min_count`, `max_count`, `name_regex`, `min_size`, `max_size` | files exist (or with `exists: false`, do not), the number of matches is in range, each basename fully matches `name_regex`, each size is in range. Sizes are bytes or `10KB` / `2MB`. |
 | `python` | `module`, `function`, `args` | `function(dir, **args)` returns `(True, detail)`. `module` is a `.py` file next to the config. An exception or a wrong return shape is a setup error (exit 2), not a verdict. |
 | `llm_rubric` | `file`, `rubric`, `sample`, `fields`, `min_pass_rate` (1.0), `max_chars` (6000), `judge` | a grader model passes every rubric line for every graded item. |
+| `table_sum` | `file` (glob), `total_label` (regex), `columns`, `tolerance` (0.01), `require_total` (true) | in every markdown table or CSV with a total row (first cell matches Total, Sum, 合计, 总计, ...), each numeric column's total equals the sum of the other rows. |
+| `numbers_in_inputs` | `file` (glob), `inputs` (glob in the inputs directory), `derived` (true), `ignore_small_integers`, `ignore` (regexes) | every number in the output appears in an input file, or is a row count, a column sum, or a per-group sum or count of an input table. Dates and times are not numbers. A number matches when the input value, rounded to the decimals shown, gives it. |
+| `covers_input_values` | `file` (glob), `input`, `column`, `ignore_case` | every distinct value of that column of the input table (CSV, JSONL, JSON array, markdown table) is mentioned in the output. |
+
+The last two compare the output with the task's input files. Tell `check` where those are with `--inputs DIR`, `$EVALCTL_INPUTS`, or a second line `inputs: <dir>` in `.evalctl.yaml` (relative to that file). Without it they report a setup error (exit 2) instead of guessing. The receipt covers the output files only, not the inputs.
 
 The schema language is a subset of JSON Schema: `type`, `required`, `properties`, `additionalProperties: false`, `items`, `enum`, `const`, `minLength`, `maxLength`, `pattern`, `minimum`, `maximum`, `minItems`, `maxItems`, `format` (`uri`, `date-time`, `date`, `email`). Any other keyword is rejected when the config loads, so a rule is never silently ignored. For CSV, empty cells count as missing and cells are converted to the number or boolean type the schema declares.
 
@@ -173,6 +183,65 @@ Graders are looked up on the check (`judge:`), then on the config (`judge:`), th
 | `command` | `command`, `family` | prompt on stdin, answer on stdout, run in an empty temp directory. Lets you grade with an agent CLI you are logged in to, without an API key. |
 
 **The grader must be from a different model family than the worker.** evalctl uses the first judge in the list that is from another family and is usable (key exported, command installed). List two families and every agent you use has a grader. The worker family comes from `--worker`, then `$EVALCTL_WORKER`, then detection (Claude Code sets `CLAUDECODE`, which means `anthropic`), then `worker_family:` in the config. For agents other than Claude Code, export `EVALCTL_WORKER` (`openai`, `deepseek`, ...) in the environment they run commands in. If the family is unknown, evalctl still grades and prints a note that the rule was not enforced. To accept same-family grading for one judge, set `allow_same_family: true` on it.
+
+## Learning a check config from one worked example
+
+Writing the first config by hand is the slow part. If you have one task where the agent's output was wrong and you corrected it, `learn` proposes the config:
+
+```bash
+evalctl learn --inputs fixtures/expense_report/inputs --draft fixtures/expense_report/draft \
+              --final fixtures/expense_report/final --name expense_report
+evalctl review expense_report
+```
+
+`--draft` is the output as the agent produced it, `--final` the same output after your edits, `--inputs` what the task started from. `learn` does not call a model: the same example always gives the same candidates.
+
+```text
+Human edits (11)
+  E5  report.md:14  "| Meals | 3 | 175.55 |" -> "| Meals | 3 | 157.55 |"
+      -> report_md_totals_add_up, report_md_numbers_from_inputs
+  E8  report.md:21  "Hotel Lumen, 356.00, on 2026-11-05." -> "Delta Air, 412.80, on 2026-11-02."
+      -> report_md_no_hotel_lumen (case-specific), report_md_has_delta_air (case-specific)
+      note: the numeric part was not converted: no relation (sum, count, lookup in the inputs) explains the new value
+  ...
+Candidate checks (17: 13 enabled, 4 disabled)
+  [on ] report_md_totals_add_up
+    type: relation   scope: general rule   from edit E5, E6, E7
+    basis: in report.md, the total row of each table equals the sum of the other rows
+    validated: final pass, draft fail
+    check:
+      {type: table_sum, file: report.md}
+```
+
+How candidates come about:
+
+1. **From the final output and the inputs.** Structure (which files exist, section headings, JSON / CSV fields and value types), format (dates as YYYY-MM-DD, two decimals, no TODO placeholders), relations (totals equal the sum of their rows, every number is traceable to the inputs, every value of an input column is covered).
+2. **Which edit each one captures.** `learn` undoes one edit at a time in a copy of the final output and re-runs the candidates. A candidate that starts to fail captures that edit.
+3. **Edits no general rule explains** become literal checks ("must not contain *biggest spend bucket by far*"). These are case-specific.
+
+Every candidate carries a type (`structure`, `format`, `relation`, `content`), a basis (the edit ids or the feature it comes from), and a scope: `general rule` or `case-specific`. Case-specific candidates are disabled by default.
+
+Concrete numbers are never written into a check. A corrected number becomes a relation (it now adds up, it is now found in the inputs), or the edit is reported as not converted, with the reason.
+
+Validation is automatic: a candidate must pass on the final output, and one taken from an edit must also fail on the draft. Candidates that do not are dropped and listed under `Discarded` with the reason. Candidates are saved to `~/.evalctl/learned/<name>.yaml`; nothing is active until you review.
+
+**review** shows each candidate with its basis and asks: `e` enable, `d` disable, `i` edit the check in `$EDITOR` (the edited check is re-run on the example; an invalid one is refused), Enter to keep, `q` to quit without saving. After a final confirmation it writes `~/.evalctl/checks/<name>.yaml`, with the basis of each check as a comment. An existing config keeps its other settings and its hand-written checks, and the previous version is saved as `<name>.yaml.bak`. `--yes` skips the prompts; `--enable ID` / `--disable ID` set choices from the command line.
+
+**feedback** records your own verdict on an output and compares it with what the checks say about the same files (the last run if the files are unchanged, otherwise the checks run now, without writing a receipt):
+
+```bash
+evalctl feedback --dir out/ --verdict bad --note "wrong largest expense"
+```
+
+| You say | Checks say | evalctl does |
+| --- | --- | --- |
+| bad | pass | The checks have a blind spot. It saves a copy of the output as it is now and prints the `learn` command to run after you fix the output by hand, with that copy as `--draft`. |
+| good | fail | Lists the checks that failed, with how often you have overruled each, and suggests relaxing or deleting them. |
+| same | same | Records the verdict. |
+
+`stats` shows how often your verdicts agreed with the checks and which checks you overruled most.
+
+Limits: `learn` finds sums, counts and lookups, not every relation (a maximum, a ratio, a ranking); such edits are reported as not converted, and a `python` or `llm_rubric` check written by hand covers them. One example cannot tell a rule from a coincidence, which is why nothing is written without `review`.
 
 ## The skill
 
@@ -245,6 +314,6 @@ uv venv && uv pip install -e ".[dev]"
 .venv/bin/python -m pytest
 ```
 
-73 tests cover every check type, config selection, exit codes, receipts and tampering, rounds, stats, and the hook script driven with Stop-hook JSON. Model-graded checks are tested against a local fake server that speaks the Anthropic and OpenAI wire formats, so the suite runs offline. To see the rubric judged by a real model, run `evalctl check` on `fixtures/forum_scrape/nav_body` and `fixtures/forum_scrape/good` with a judge configured.
+91 tests cover every check type, config selection, exit codes, receipts and tampering, rounds, stats, the hook script driven with Stop-hook JSON, and `learn` / `review` / `feedback` on the draft + final example in `fixtures/expense_report`. Model-graded checks are tested against a local fake server that speaks the Anthropic and OpenAI wire formats, so the suite runs offline. To see the rubric judged by a real model, run `evalctl check` on `fixtures/forum_scrape/nav_body` and `fixtures/forum_scrape/good` with a judge configured.
 
 `python3 fixtures/forum_scrape/build.py` regenerates the fixtures.

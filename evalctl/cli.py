@@ -15,9 +15,10 @@ from .judge import detect_worker
 EXIT_PASS, EXIT_FAIL, EXIT_CONFIG = 0, 1, 2
 
 
-def run_checks(conf: cfg.Config, workdir: Path, worker: Optional[str]) -> List[Result]:
+def run_checks(conf: cfg.Config, workdir: Path, worker: Optional[str],
+               inputs: Optional[Path] = None) -> List[Result]:
     """Hard checks first; model-graded checks only when every hard check passed."""
-    ctx = Context(workdir=workdir, config=conf, worker=worker)
+    ctx = Context(workdir=workdir, config=conf, worker=worker, inputs=inputs)
     results: dict = {}
     hard = [c for c in conf.checks if c.type not in SOFT_TYPES]
     soft = [c for c in conf.checks if c.type in SOFT_TYPES]
@@ -58,11 +59,12 @@ def _config_error(args: argparse.Namespace, message: str, workdir: Optional[Path
 def cmd_check(args: argparse.Namespace) -> int:
     started = time.time()
     try:
-        workdir, cpath, _ = cfg.select(args.dir, args.config)
+        workdir, cpath, pointer = cfg.select(args.dir, args.config)
     except ConfigError as e:
         return _config_error(args, str(e))
     try:
         conf = cfg.load(cpath, workdir)
+        inputs = cfg.resolve_inputs(args.inputs, pointer)
     except ConfigError as e:
         return _config_error(args, str(e), workdir, cpath.stem)
 
@@ -70,7 +72,7 @@ def cmd_check(args: argparse.Namespace) -> int:
     digest = receipt.digest(receipt.hash_artifacts(workdir, conf.artifacts))
     task_id, round_no = store.plan_round(workdir, conf.name, conf.sha256, digest)
 
-    results = run_checks(conf, workdir, worker)
+    results = run_checks(conf, workdir, worker, inputs)
     status = report.overall(results)
     receipt_file = None
     if status == PASS:
@@ -155,6 +157,12 @@ def cmd_stats(args: argparse.Namespace) -> int:
             print("  most often failing checks:")
             for c in s["top_failing_checks"]:
                 print(f"    {c['failed_rounds']:>3}x  {c['id']}")
+        fb = s.get("feedback")
+        if fb:
+            print(f"  your verdicts: {fb['verdicts']}   agreed with the checks: {fb['agree']}   "
+                  f"checks too lenient: {fb['checks_too_lenient']}   too strict: {fb['checks_too_strict']}")
+            for cid, k in fb["overruled"].items():
+                print(f"    {k:>3}x  overruled: {cid}")
         print()
     return 0
 
@@ -169,6 +177,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     c.add_argument("--config", help="check config name (in ~/.evalctl/checks) or path to a .yaml")
     c.add_argument("--json", action="store_true", help="print JSON instead of the text checklist")
     c.add_argument("--worker", help="model family that produced the output (anthropic, openai, deepseek, ...)")
+    c.add_argument("--inputs", help="directory with the task's input files, for checks that compare "
+                                    "the output with them (default: $EVALCTL_INPUTS, else `inputs:` in .evalctl.yaml)")
     c.add_argument("--source", default="cli", choices=["cli", "hook"], help=argparse.SUPPRESS)
     c.set_defaults(fn=cmd_check)
 
@@ -182,6 +192,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     s.add_argument("--config")
     s.add_argument("--json", action="store_true")
     s.set_defaults(fn=cmd_stats)
+
+    from . import teach
+    teach.add_parsers(sub)
 
     args = ap.parse_args(argv)
     try:

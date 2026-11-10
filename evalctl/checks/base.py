@@ -39,6 +39,7 @@ class Context:
     workdir: Path
     config: Config
     worker: Optional[str] = None
+    inputs: Optional[Path] = None  # the task's input files, for input/output relation checks
 
 
 class Check:

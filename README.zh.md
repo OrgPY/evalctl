@@ -8,7 +8,7 @@
 - 检查规则放在 agent 工作目录之外，agent 改不到。
 - Claude Code 可以用 Stop hook 把"要求"变成"强制"。
 
-v0 范围：`check`、`verify`、`stats`、一个通用 skill、一个 Stop hook、一个示例工作流（论坛抓取）。不做代理网关、文件监听、GUI。
+范围：`check`、`verify`、`stats`；从做过的任务生成检查配置的 `learn`、`review`、`feedback`（v0.5）；一个通用 skill、一个 Stop hook、两个示例工作流。不做代理网关、文件监听、GUI。
 
 ## 安装
 
@@ -27,7 +27,9 @@ evalctl --version
 | `checks/<name>.yaml` | 检查配置 |
 | `judge.yaml` | `llm_rubric` 用的评分模型 |
 | `key` | HMAC 签名密钥，第一次通过时生成，权限 600 |
-| `runs.sqlite` | 每次 check 的运行记录 |
+| `runs.sqlite` | 每次 check 的运行记录，以及每条 `feedback` 判断 |
+| `learned/<name>.yaml` | `evalctl learn` 产生的候选检查，等待 `review` |
+| `feedback/<name>/<时间>/draft` | 检查通过但被你判为 bad 的产出副本 |
 
 ## 先跑一下
 
@@ -60,9 +62,12 @@ Round 1 of 3. Fix only the FAIL items above, leave everything that passed untouc
 ## 命令
 
 ```text
-evalctl check  [--dir DIR] [--config NAME] [--json] [--worker FAMILY]
+evalctl check  [--dir DIR] [--config NAME] [--inputs DIR] [--json] [--worker FAMILY]
 evalctl verify [--dir DIR] [--config NAME] [--json]
 evalctl stats  [--config NAME] [--json]
+evalctl learn  --draft DIR --final DIR --name NAME [--inputs DIR] [--json]
+evalctl review NAME [--enable ID] [--disable ID] [--yes]
+evalctl feedback --verdict good|bad [--dir DIR] [--note TEXT] [--config NAME] [--inputs DIR] [--json]
 ```
 
 **check。** 配置的选择顺序：`--config`，否则在目录及其父目录里找最近的 `.evalctl.yaml`。不带 `--dir` 时，检查的是 `.evalctl.yaml` 所在的目录，所以在子目录里运行也可以。硬检查先跑，全部通过后才跑 `llm_rubric`。默认输出文字清单，`--json` 输出 JSON（里面也带那份文字）。
@@ -84,7 +89,7 @@ evalctl stats  [--config NAME] [--json]
 
 ## 给新工作流写检查配置
 
-1. 新建 `~/.evalctl/checks/<name>.yaml`，可以从 `checks/forum_scrape.yaml` 改。
+1. 新建 `~/.evalctl/checks/<name>.yaml`，可以从 `checks/forum_scrape.yaml` 改，也可以让 `evalctl learn` 起草（见下一节）。
 2. 在这个工作流的产出目录里放一个 `.evalctl.yaml`，只写一行：`config: <name>`。
 3. 手工准备一份好的产出和几份坏的，分别跑 `evalctl check`，直到失败信息读起来就是你会对 agent 说的修改指令。
 
@@ -119,6 +124,11 @@ checks:
 | `file` | `path`（glob）、`exists`（true）、`min_count`、`max_count`、`name_regex`、`min_size`、`max_size` | 文件存在（`exists: false` 则是不得存在），匹配数量在范围内，文件名完整匹配 `name_regex`，大小在范围内。大小可以写字节数或 `10KB`、`2MB`。 |
 | `python` | `module`、`function`、`args` | `function(dir, **args)` 返回 `(True, detail)`。`module` 是放在配置旁边的 `.py` 文件。函数抛异常或返回值形状不对，算环境错误（退出码 2），不算判定结果。 |
 | `llm_rubric` | `file`、`rubric`、`sample`、`fields`、`min_pass_rate`（1.0）、`max_chars`（6000）、`judge` | 评分模型对每个被评条目的每条 rubric 都判通过。 |
+| `table_sum` | `file`（glob）、`total_label`（正则）、`columns`、`tolerance`（0.01）、`require_total`（true） | 每个带合计行的 markdown 表格或 CSV（首格匹配 Total、Sum、合计、总计等）里，各数值列的合计等于其余各行之和。 |
+| `numbers_in_inputs` | `file`（glob）、`inputs`（输入目录内的 glob）、`derived`（true）、`ignore_small_integers`、`ignore`（正则） | 输出里的每个数字都能在输入文件中找到，或者是输入表格的行数、列合计、分组合计或分组计数。日期和时间不算数字。输入值按输出显示的小数位四舍五入后相等即算匹配。 |
+| `covers_input_values` | `file`（glob）、`input`、`column`、`ignore_case` | 输入表格（CSV、JSONL、JSON 数组、markdown 表格）该列的每个不同取值都在输出中出现。 |
+
+后两种要把输出和任务的输入文件对照。用 `--inputs DIR`、`$EVALCTL_INPUTS`，或在 `.evalctl.yaml` 里加一行 `inputs: <目录>`（相对该文件）告诉 `check` 输入在哪。没给的话它们报环境错误（退出码 2），不会猜。回执只覆盖输出文件，不覆盖输入。
 
 schema 语法是 JSON Schema 的子集：`type`、`required`、`properties`、`additionalProperties: false`、`items`、`enum`、`const`、`minLength`、`maxLength`、`pattern`、`minimum`、`maximum`、`minItems`、`maxItems`、`format`（`uri`、`date-time`、`date`、`email`）。写了其他关键字，加载配置时直接报错，不会出现"写了规则但没生效"。CSV 的空单元格算缺失，单元格会按 schema 声明的数字或布尔类型转换。
 
@@ -175,6 +185,65 @@ def charts_referenced(dir, min_charts=1):
 | `command` | `command`、`family` | 提示词走 stdin，答案读 stdout，在空的临时目录里执行。可以直接用已登录的 agent CLI 评分，不需要 API key。 |
 
 **评分模型必须和干活的模型不同家。** evalctl 取列表里第一个"不同家且可用（key 已导出或命令已安装）"的评分模型。列表里放两家，你用的每个 agent 就都有人评。干活模型的家族依次取自：`--worker`、环境变量 `EVALCTL_WORKER`、自动识别（Claude Code 会设置 `CLAUDECODE`，对应 `anthropic`）、配置里的 `worker_family:`。Claude Code 以外的 agent，请在它执行命令的环境里导出 `EVALCTL_WORKER`（`openai`、`deepseek` 等）。家族未知时仍然会评分，并在输出里注明这条规则没有被强制。想对某个评分模型放开同家限制，在它上面写 `allow_same_family: true`。
+
+## 从一个做过的任务学习检查配置
+
+手写第一份配置最费时间。如果你手上有一个任务，agent 的产出有错、你改好了，`learn` 可以替你起草配置：
+
+```bash
+evalctl learn --inputs fixtures/expense_report/inputs --draft fixtures/expense_report/draft \
+              --final fixtures/expense_report/final --name expense_report
+evalctl review expense_report
+```
+
+`--draft` 是 agent 的初稿，`--final` 是你改过的终稿，`--inputs` 是任务的输入。`learn` 不调用模型，同一个样例每次得到同样的候选。
+
+```text
+Human edits (11)
+  E5  report.md:14  "| Meals | 3 | 175.55 |" -> "| Meals | 3 | 157.55 |"
+      -> report_md_totals_add_up, report_md_numbers_from_inputs
+  E8  report.md:21  "Hotel Lumen, 356.00, on 2026-11-05." -> "Delta Air, 412.80, on 2026-11-02."
+      -> report_md_no_hotel_lumen (case-specific), report_md_has_delta_air (case-specific)
+      note: the numeric part was not converted: no relation (sum, count, lookup in the inputs) explains the new value
+  ...
+Candidate checks (17: 13 enabled, 4 disabled)
+  [on ] report_md_totals_add_up
+    type: relation   scope: general rule   from edit E5, E6, E7
+    basis: in report.md, the total row of each table equals the sum of the other rows
+    validated: final pass, draft fail
+    check:
+      {type: table_sum, file: report.md}
+```
+
+候选检查的来源：
+
+1. **从终稿和输入归纳。** 结构（有哪些文件、章节标题、JSON / CSV 的字段和值类型）、格式（日期写成 YYYY-MM-DD、两位小数、没有 TODO 占位）、关系（合计等于分项和、每个数字可在输入中找到、输入某列的每个取值都被覆盖）。
+2. **对应到哪处修改。** `learn` 在终稿的副本里每次只撤销一处修改，重跑候选检查。哪条开始失败，哪条就对应这处修改。
+3. **没有通用规则能解释的修改**，写成字面检查（"不得出现 *biggest spend bucket by far*"），属于本例特有。
+
+每条候选都带类型（`structure` 结构、`format` 格式、`relation` 关系、`content` 内容）、依据（来自哪几处修改或哪个特征）和范围：`general rule`（通用规则）或 `case-specific`（本例特有）。本例特有的默认禁用。
+
+具体数值不会写进检查。改过的数字要么变成关系（现在加得上了、现在能在输入里找到了），要么这处修改被报告为"未转换"并说明原因。
+
+验证是自动的：每条候选必须让终稿通过；从修改提取的，还必须让初稿失败。不满足的丢弃，并在 `Discarded` 下列出原因。候选保存在 `~/.evalctl/learned/<name>.yaml`，review 之前什么都不生效。
+
+**review** 逐条显示候选及依据，让你选：`e` 启用，`d` 禁用，`i` 在 `$EDITOR` 里编辑（编辑后会在样例上重新验证，无效的检查不接受），回车保持原样，`q` 不保存退出。最后确认一次，写入 `~/.evalctl/checks/<name>.yaml`，每条检查的依据写成注释。已有的配置会保留其他设置和手写的检查，旧版本另存为 `<name>.yaml.bak`。`--yes` 跳过提问，`--enable ID` / `--disable ID` 在命令行上指定选择。
+
+**feedback** 记录你自己对某次产出的判断，并和检查对同一批文件的结论比较（文件没变就用上次运行的结果，否则现场跑一遍，不写回执）：
+
+```bash
+evalctl feedback --dir out/ --verdict bad --note "最大一笔支出写错了"
+```
+
+| 你的判断 | 检查结论 | evalctl 的反应 |
+| --- | --- | --- |
+| bad | 通过 | 检查有盲区。保存产出当前的副本，并给出你手工改好之后要运行的 `learn` 命令（副本作为 `--draft`）。 |
+| good | 失败 | 列出导致失败的检查，以及每条被你推翻过几次，建议放宽或删除。 |
+| 一致 | 一致 | 只记录。 |
+
+`stats` 会显示你的判断和检查一致的次数，以及哪些检查最常被你推翻。
+
+局限：`learn` 能找出求和、计数和查找关系，找不出所有关系（最大值、比例、排序）；这类修改会报告为未转换，可以手写 `python` 或 `llm_rubric` 检查来覆盖。单个样例分不清规则和巧合，所以不经 `review` 不会写入任何配置。
 
 ## Skill
 
@@ -247,6 +316,6 @@ uv venv && uv pip install -e ".[dev]"
 .venv/bin/python -m pytest
 ```
 
-73 个测试，覆盖每种检查类型、配置选择、退出码、回执和各种篡改、轮数、统计，以及用 Stop hook 的 JSON 驱动 hook 脚本。模型评分的检查用一个本地假服务器测试（它同时实现 Anthropic 和 OpenAI 两种协议格式），所以整套测试可以离线跑。想看真实模型怎么判 rubric，配好评分模型后对 `fixtures/forum_scrape/nav_body` 和 `fixtures/forum_scrape/good` 运行 `evalctl check`。
+91 个测试，覆盖每种检查类型、配置选择、退出码、回执和各种篡改、轮数、统计、用 Stop hook 的 JSON 驱动 hook 脚本，以及在 `fixtures/expense_report` 的初稿 + 终稿样例上跑 `learn` / `review` / `feedback`。模型评分的检查用一个本地假服务器测试（它同时实现 Anthropic 和 OpenAI 两种协议格式），所以整套测试可以离线跑。想看真实模型怎么判 rubric，配好评分模型后对 `fixtures/forum_scrape/nav_body` 和 `fixtures/forum_scrape/good` 运行 `evalctl check`。
 
 `python3 fixtures/forum_scrape/build.py` 可以重新生成样例。
