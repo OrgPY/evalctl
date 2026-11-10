@@ -1,0 +1,78 @@
+# Check config for the forum scraping workflow.
+# Install: cp checks/forum_scrape.yaml ~/.evalctl/checks/
+# Use:     echo "config: forum_scrape" > <scrape output dir>/.evalctl.yaml
+name: forum_scrape
+description: A forum scrape must deliver posts.jsonl with one complete, real post per line.
+
+# Files the receipt covers. Editing any of them after a PASS invalidates the receipt.
+artifacts:
+  - posts.jsonl
+
+max_rounds: 3
+
+checks:
+  - id: posts_file
+    type: file
+    path: posts.jsonl
+    min_size: 1
+    hint: Write the scraped posts to posts.jsonl in this directory, one JSON object per line.
+
+  - id: posts_schema
+    type: schema
+    file: posts.jsonl
+    record_schema:
+      type: object
+      # url is enforced by every_post_has_url below, so a missing url is reported once.
+      required: [title, author, posted_at, body]
+      properties:
+        title: {type: string, minLength: 1}
+        url: {type: string}
+        author: {type: string, minLength: 1}
+        posted_at: {type: string, format: date-time}
+        body: {type: string, minLength: 1}
+    hint: >-
+      Every line needs title, url, author, posted_at (ISO 8601 date-time such as
+      2026-03-01T09:30:00Z) and body as non-empty strings. Re-extract the missing
+      value from the post's page; do not invent it and do not drop the post.
+
+  - id: every_post_has_url
+    type: schema
+    file: posts.jsonl
+    record_schema:
+      type: object
+      required: [url]
+      properties:
+        url: {type: string, minLength: 1, pattern: "^https?://", format: uri}
+    hint: url must be the absolute http(s) permalink of the post itself.
+
+  - id: unique_urls
+    type: schema
+    file: posts.jsonl
+    unique: [url]
+    hint: Each post may appear once. Remove the repeated line, or fix the url if two different posts got the same one.
+
+  - id: post_count
+    type: schema
+    file: posts.jsonl
+    # Adjust the range to the size of scrape you expect.
+    min_records: 20
+    max_records: 500
+    hint: Too few usually means pagination stopped early; scrape the remaining pages. Do not pad with duplicates or made-up posts.
+
+  # Runs only after every check above has passed.
+  - id: body_is_post_content
+    type: llm_rubric
+    file: posts.jsonl
+    sample: 10
+    fields: [title, url, body]
+    rubric:
+      - id: real_post_body
+        text: >-
+          The body is the actual text a forum member wrote in this post (a question, answer,
+          story or opinion that fits the title). It is NOT site chrome: navigation or menu
+          links, breadcrumbs, login/register prompts, cookie or consent banners, footers,
+          "related threads" lists, advertising or sponsored text. A body that mixes real post
+          text with a substantial amount of such chrome also fails.
+    hint: >-
+      The extractor is selecting the wrong element. Point it at the post-content container
+      and re-extract body for ALL posts (the grader only sampled some), then re-run.

@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "evalctl"
+version = "0.1.0"
+description = "Lightweight quality gate for AI agent output: check, fix, re-check, signed receipt."
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+dependencies = ["PyYAML>=5.4"]
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[project.scripts]
+evalctl = "evalctl.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["evalctl*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

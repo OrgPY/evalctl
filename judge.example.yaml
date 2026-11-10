@@ -1,0 +1,37 @@
+# Grader models for llm_rubric checks. Copy to ~/.evalctl/judge.yaml and edit.
+#
+# evalctl walks this list top to bottom and uses the first judge that
+#   (a) is from a different model family than the agent that did the work, and
+#   (b) is usable (API key exported / command installed).
+# The worker family comes from --worker, $EVALCTL_WORKER, or is detected
+# (Claude Code -> anthropic). List at least two families so every agent you use
+# can be graded by a different one.
+judges:
+  # API judges: need the key in the environment evalctl runs in.
+  - provider: deepseek            # OpenAI-compatible, https://api.deepseek.com, DEEPSEEK_API_KEY
+    model: deepseek-chat
+  - provider: anthropic           # ANTHROPIC_API_KEY
+    model: claude-haiku-5-5
+  - provider: openai              # OPENAI_API_KEY
+    model: gpt-5-mini
+
+  # Any other OpenAI-compatible endpoint:
+  # - provider: openai_compatible
+  #   base_url: https://openrouter.ai/api/v1
+  #   api_key_env: OPENROUTER_API_KEY
+  #   model: google/gemini-2.5-flash
+  #   family: google
+
+  # No API key? Use an agent CLI you are already logged in to. The prompt goes to
+  # stdin, the answer is read from stdout, and the command runs in an empty temp dir.
+  # - provider: command
+  #   command: codex exec --skip-git-repo-check --ephemeral -s read-only -
+  #   family: openai
+  #   timeout: 300
+  # - provider: command
+  #   command: claude -p --model haiku
+  #   family: anthropic
+  #   timeout: 300
+
+  # To accept a grader from the same family as the worker, add to that judge:
+  #   allow_same_family: true

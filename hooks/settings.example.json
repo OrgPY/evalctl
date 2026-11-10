@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/evalctl/hooks/evalctl_stop_hook.py\"",
+            "timeout": 600,
+            "statusMessage": "evalctl: verifying receipt"
+          }
+        ]
+      }
+    ]
+  }
+}
