@@ -130,18 +130,30 @@ class LlmRubricCheck(Check):
 
     @classmethod
     def run(cls, spec: CheckSpec, ctx: Context) -> Result:
+        """One grading, no repetition. The check engine calls prepare / grade / conclude itself
+        when the loop asks for judge_repeat."""
+        prep = cls.prepare(spec, ctx)
+        if isinstance(prep, Result):
+            return prep
+        try:
+            gradings = [cls.grade(prep)]
+        except JudgeError as e:
+            return cls.grading_error(spec, prep, e)
+        return cls.conclude(spec, prep, gradings)
+
+    @classmethod
+    def prepare(cls, spec: CheckSpec, ctx: Context) -> Any:
+        """-> a dict with the grader and the items to grade, or a Result when grading cannot start."""
         p = spec.params
         files = [f for f in match_files(ctx.workdir, p["file"]) if f.is_file()]
         if not files:
             return result(spec, [f"{p['file']}: file not found, nothing to grade"], "", "file missing")
         criteria = _criteria(spec)
-        ids = [cid for cid, _ in criteria]
         try:
             judges, source = configured_judges(p.get("judge"), ctx.config.judge)
             judge, note = pick_judge(judges, source, ctx.worker)
         except ConfigError as e:
             return Result(spec.id, spec.type, ERROR, "no usable grader model", [str(e)])
-
         items: List[Tuple[str, str]] = []
         total = 0
         for f in files:
@@ -152,10 +164,17 @@ class LlmRubricCheck(Check):
             total += n
         if not items:
             return result(spec, [f"{p['file']}: no records to grade"], "", "empty")
+        return {"judge": judge, "note": note, "items": items, "total": total, "criteria": criteria,
+                "concurrency": int(p.get("concurrency", 5))}
 
+    @classmethod
+    def grade(cls, prep: Dict[str, Any]) -> List[Dict[str, Tuple[bool, str]]]:
+        """Grade every item once. -> per item {criterion id: (passed, reason)}. Raises JudgeError."""
+        judge, criteria = prep["judge"], prep["criteria"]
+        ids = [cid for cid, _ in criteria]
         crit_text = "\n".join(f"- id \"{cid}\": {text}" for cid, text in criteria)
 
-        def grade(item: Tuple[str, str]) -> Dict[str, Tuple[bool, str]]:
+        def one(item: Tuple[str, str]) -> Dict[str, Tuple[bool, str]]:
             where, text = item
             prompt = PROMPT.format(criteria=crit_text, where=where, item=text)
             last: Optional[Exception] = None
@@ -166,39 +185,76 @@ class LlmRubricCheck(Check):
                     last = e
             raise JudgeError(str(last))
 
-        try:
-            with ThreadPoolExecutor(max_workers=int(p.get("concurrency", 5))) as pool:
-                graded = list(pool.map(grade, items))
-        except JudgeError as e:
-            return Result(spec.id, spec.type, ERROR, "grader model failed",
-                          [f"could not grade with {judge.label}: {e}"])
+        with ThreadPoolExecutor(max_workers=prep["concurrency"]) as pool:
+            return list(pool.map(one, prep["items"]))
 
+    @classmethod
+    def grading_error(cls, spec: CheckSpec, prep: Dict[str, Any], e: Exception) -> Result:
+        return Result(spec.id, spec.type, ERROR, "grader model failed",
+                      [f"could not grade with {prep['judge'].label}: {e}"])
+
+    @classmethod
+    def conclude(cls, spec: CheckSpec, prep: Dict[str, Any], gradings: List[List[Dict[str, Tuple[bool, str]]]],
+                 agree: Optional[int] = None, unstable: str = "exclude") -> Result:
+        """Turn n gradings into one verdict per criterion.
+
+        A criterion passes one grading when enough items pass it (`min_pass_rate`). With several
+        gradings the verdict is adopted only when `agree` of them say the same; otherwise the
+        criterion is unstable: left out of the verdict (`exclude`) or counted as failed (`fail`).
+        """
+        p = spec.params
+        judge, items, total, criteria = prep["judge"], prep["items"], prep["total"], prep["criteria"]
+        n = len(gradings)
+        agree = n if agree is None else min(agree, n)
         need = float(p.get("min_pass_rate", 1.0))
         texts = dict(criteria)
         failures: List[str] = []
-        failed_criteria = []
-        for cid in ids:
-            bad = [(items[i][0], v[cid][1]) for i, v in enumerate(graded) if not v[cid][0]]
-            rate = 1 - len(bad) / len(items)
-            if rate + 1e-9 >= need:
+        failed_criteria: List[str] = []
+        unstable_ids: List[str] = []
+        votes: Dict[str, Dict[str, Any]] = {}
+        item_passes = 0
+        for cid, _ in criteria:
+            bad_per = [[(items[i][0], v[cid][1]) for i, v in enumerate(g) if not v[cid][0]] for g in gradings]
+            item_passes += sum(len(items) - len(b) for b in bad_per)
+            passed = [1 - len(b) / len(items) + 1e-9 >= need for b in bad_per]
+            yes = sum(passed)
+            verdict = "pass" if yes >= agree else "fail" if n - yes >= agree else "unstable"
+            votes[cid] = {"pass": yes, "n": n, "verdict": verdict}
+            if verdict == "pass":
                 continue
+            if verdict == "unstable":
+                unstable_ids.append(cid)
+                if unstable != "fail":
+                    continue
+                failed_criteria.append(cid)
+                failures.append(f"criterion '{cid}' ({clip(texts[cid], 140)}): no stable verdict, "
+                                f"{yes} of {n} gradings passed and {agree} must agree")
+                continue
+            bad = next(b for b, ok in zip(bad_per, passed) if not ok)
             failed_criteria.append(cid)
             failures.append(
                 f"criterion '{cid}' ({clip(texts[cid], 140)}): {len(bad)} of {len(items)} graded item(s) fail"
                 + (f", allowed share {1 - need:.0%}" if need < 1 else "")
+                + (f" (failed in {n - yes} of {n} gradings)" if n > 1 else "")
             )
             failures += [f"  {where}: {clip(reason, 220)}" for where, reason in bad[:MAX_LISTED]]
         meta: Dict[str, Any] = {"judge": judge.label, "judge_family": judge.family,
-                                "graded": len(items), "total": total}
-        if note:
-            meta["note"] = note
+                                "graded": len(items), "total": total, "gradings": n, "votes": votes,
+                                "score": round(item_passes / (len(items) * len(criteria) * n), 4)}
+        if unstable_ids:
+            meta["unstable"] = unstable_ids
+        if prep["note"]:
+            meta["note"] = prep["note"]
         sampled = f"{len(items)} of {total} item(s)" if len(items) < total else f"{len(items)} item(s)"
+        how = f"{sampled} graded by {judge.label}" + (f", {n} times" if n > 1 else "")
         if failures and len(items) < total:
             failures.append(
                 f"  (only {sampled} were graded; the same problem likely affects ungraded items too, "
                 "so check all of them, not just the ones listed)"
             )
-        res = result(spec, failures, f"{sampled} graded by {judge.label}, all criteria met",
-                     f"failed criteria: {', '.join(failed_criteria)} ({sampled} graded by {judge.label})")
+        excluded = [c for c in unstable_ids if c not in failed_criteria]
+        ok = f"{how}, all criteria met" if not excluded else \
+            f"{how}, {len(criteria) - len(excluded)} of {len(criteria)} criteria met, {len(excluded)} without a stable verdict (excluded)"
+        res = result(spec, failures, ok, f"failed criteria: {', '.join(failed_criteria)} ({how})")
         res.meta = meta
         return res

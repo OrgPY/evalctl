@@ -1,0 +1,26 @@
+{
+  "status": "fail",
+  "passed": false,
+  "round": 1,
+  "max_rounds": 3,
+  "checks": [
+    {
+      "id": "posts_file",
+      "type": "file",
+      "summary": "1 problem(s)",
+      "failures": [
+        "posts.jsonl: 0 bytes, minimum is 1"
+      ],
+      "status": "fail"
+    },
+    {
+      "id": "post_count",
+      "type": "schema",
+      "summary": "1 problem(s)",
+      "failures": [
+        "posts.jsonl: 0 record(s), expected at least 20"
+      ],
+      "status": "fail"
+    }
+  ]
+}

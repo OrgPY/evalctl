@@ -1,0 +1,33 @@
+{
+  "status": "fail",
+  "passed": false,
+  "round": 1,
+  "max_rounds": 3,
+  "checks": [
+    {
+      "id": "report_md_totals_add_up",
+      "type": "table_sum",
+      "summary": "1 problem(s)",
+      "failures": [
+        "report.md:13: column Amount: Total row says 1,351.94 but the rows above add up to 1,341.94"
+      ],
+      "hint": "Recompute the total row from the rows above it.",
+      "status": "fail"
+    },
+    {
+      "id": "report_md_numbers_from_inputs",
+      "type": "numbers_in_inputs",
+      "summary": "1 problem(s)",
+      "failures": [
+        "report.md:10: 147.55 is not in the inputs and is not a sum or count of input rows"
+      ],
+      "status": "fail"
+    },
+    {
+      "id": "report_md_exists",
+      "type": "file",
+      "status": "pass",
+      "summary": "ok"
+    }
+  ]
+}

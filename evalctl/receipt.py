@@ -15,7 +15,7 @@ from . import paths
 from .checks.base import Result, match_files
 from .config import Config, ConfigError
 
-VERSION = 1
+VERSION = 2  # v2 adds profile, switches and what actually ran
 # Never part of the output when `artifacts` is not set in the config.
 DEFAULT_IGNORED_DIRS = {".eval", ".git", ".hg", ".svn", ".claude", ".codex", "__pycache__",
                         "node_modules", ".venv", "venv", ".pytest_cache", ".mypy_cache",
@@ -89,7 +89,10 @@ def _sign(body: Dict[str, Any], key: bytes) -> str:
     return "hmac-sha256:" + hmac.new(key, payload, hashlib.sha256).hexdigest()
 
 
-def write(workdir: Path, config: Config, results: List[Result], round_no: Optional[int]) -> Path:
+def write(workdir: Path, config: Config, results: List[Result], round_no: Optional[int],
+          loop: Any = None, ran: Optional[Dict[str, Any]] = None) -> Path:
+    """`loop` is the resolved loop.Loop; `ran` records what each switch actually did:
+    {"lint": {...} | None, "judge_repeat": {...} | None, "repeat": {...} | None}."""
     artifacts = hash_artifacts(workdir, config.artifacts)
     if not artifacts:
         raise ConfigError(
@@ -107,6 +110,9 @@ def write(workdir: Path, config: Config, results: List[Result], round_no: Option
         "artifacts": artifacts,
         "checks": [{"id": r.id, "type": r.type, "status": r.status, "summary": r.summary}
                    for r in results],
+        "profile": loop.profile if loop else None,
+        "switches": loop.switches() if loop else None,
+        "ran": ran or {},
     }
     body["signature"] = _sign(body, load_key())
     rp = paths.receipt_path(workdir)
@@ -136,9 +142,38 @@ def read(workdir: Path) -> Optional[Dict[str, Any]]:
     return data if isinstance(data, dict) else {}
 
 
-def verify(workdir: Path, config: Optional[Config], pointer_name: Optional[str] = None
+def missing_switches(rec: Dict[str, Any], config: Optional[Config], loop: Any) -> List[str]:
+    """Switches the loop settings in force now require, which the receipt does not show as run."""
+    if loop is None:
+        return []
+    ran = rec.get("ran") or {}
+    who = f"profile '{loop.profile}'" if loop.profile else "the loop settings in .evalctl.yaml"
+    out: List[str] = []
+    if loop.lint_on:
+        lint = ran.get("lint") or {}
+        if not lint.get("ran") or (config is not None and lint.get("config_sha") != config.sha256):
+            out.append(f"{who} requires lint (when: {loop.lint['when']}), but the receipt records no lint "
+                       "of this check config")
+    has_rubric = config is None or any(c.type == "llm_rubric" for c in config.checks)
+    if loop.judge_repeat_on and has_rubric:
+        jr, want = ran.get("judge_repeat") or {}, loop.judge_repeat
+        if not jr.get("ran") or jr.get("n", 0) < want["n"] or jr.get("agree", 0) < want["agree"]:
+            out.append(f"{who} requires judge_repeat (n={want['n']}, agree={want['agree']}), but the receipt "
+                       + (f"records n={jr.get('n')}, agree={jr.get('agree')}" if jr.get("ran")
+                          else "records no repeated grading"))
+    if loop.repeat_on:
+        rp, want = ran.get("repeat") or {}, loop.repeat
+        if not rp.get("ran") or rp.get("k", 0) < want["k"] or not rp.get("agreed"):
+            out.append(f"{who} requires repeat (k={want['k']}, when: on_pass), but the receipt records "
+                       + ("a repeat that did not agree" if rp.get("ran") and rp.get("k", 0) >= want["k"]
+                          else f"only k={rp.get('k')}" if rp.get("ran") else "no repeat run")
+                       + ". Repeat only runs under `evalctl run` or `evalctl bench`, not under a plain `evalctl check`")
+    return out
+
+
+def verify(workdir: Path, config: Optional[Config], loop: Any = None
            ) -> Tuple[bool, List[str], Optional[Dict[str, Any]]]:
-    """-> (valid, reasons it is not valid, receipt). `config` is the config in force now."""
+    """-> (valid, reasons it is not valid, receipt). `config` and `loop` are what is in force now."""
     rec = read(workdir)
     rp = paths.receipt_path(workdir)
     if rec is None:
@@ -172,4 +207,5 @@ def verify(workdir: Path, config: Optional[Config], pointer_name: Optional[str] 
             reasons.append(f"{path}: new file since the receipt was written")
         elif then[path] != now[path]:
             reasons.append(f"{path}: content changed since the receipt was written")
+    reasons += missing_switches(rec, config, loop)
     return not reasons, reasons, rec

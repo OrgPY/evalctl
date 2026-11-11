@@ -1,0 +1,7 @@
+{
+  "category": "environment",
+  "steps": [
+    2
+  ],
+  "why": "The forum cannot be reached at all (DNS failure in the sandbox); the agent delivers an empty file."
+}

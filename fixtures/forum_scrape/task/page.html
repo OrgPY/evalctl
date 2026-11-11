@@ -1,0 +1,162 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<title>Latest posts - HomeLab Forum</title>
+<link rel="canonical" href="https://forum.homelab.example/latest">
+<base href="https://forum.homelab.example/">
+</head><body>
+<nav class="site-nav">Home Forums New posts Search forums What's new Members Log in Register Search titles only By: Advanced search Menu Install the app</nav>
+<div class="breadcrumb">Home > Forums > Hardware > Networking | Previous thread | Next thread | Log in or register to reply | Share: Facebook X Reddit Email Link</div>
+<main>
+<article class="post" id="post-1047">
+  <h2 class="post-title"><a href="/t/1047">Proxmox cluster loses quorum after every power cut</a></h2>
+  <div class="post-meta">by <a class="author" href="/u/nas_gardener">nas_gardener</a> <time datetime="2026-10-02T09:07:00Z">Oct 2, 2026 at 09:07</time></div>
+  <div class="post-body"><p>I run three NUCs in a Proxmox cluster and each time the power drops, two of them come back before the third and the cluster sits there without quorum until I log in and restart corosync by hand. Is there a sane way to make the nodes wait for each other, or should I just add a QDevice on the Raspberry Pi that is always on?</p></div>
+  <div class="post-actions">Reply | Like | Share: Facebook X Reddit Email Link | Report</div>
+</article>
+<article class="post" id="post-1054">
+  <h2 class="post-title"><a href="/t/1054">ZFS scrub taking 31 hours on 4x12TB raidz1, is that normal?</a></h2>
+  <div class="post-meta">by <a class="author" href="/u/blockpointer">blockpointer</a> <time datetime="2026-10-03T10:14:00Z">Oct 3, 2026 at 10:14</time></div>
+  <div class="post-body"><p>The pool is about 70 percent full and the scrub that used to finish overnight now runs for more than a day. SMART looks clean on all four drives. I noticed one disk reports much lower throughput in zpool iostat, so I am starting to suspect a bad SATA cable rather than the drive itself. What would you check first?</p></div>
+  <div class="post-actions">Reply | Like | Share: Facebook X Reddit Email Link | Report</div>
+</article>
+<article class="post" id="post-1061">
+  <h2 class="post-title"><a href="/t/1061">Finally got 10GbE working over the old Cat5e in my walls</a></h2>
+  <div class="post-meta">by <a class="author" href="/u/copper_optimist">copper_optimist</a> <time datetime="2026-10-04T11:21:00Z">Oct 4, 2026 at 11:21</time></div>
+  <div class="post-body"><p>Everyone told me I would need to pull new cable, but two runs of roughly 18 metres negotiated at 10G without errors after I re-terminated the keystones. The third run only holds 2.5G. Posting the iperf numbers in case it helps someone decide whether to try before tearing the walls open.</p></div>
+  <aside class="ad">SPONSORED - Upgrade your rack today! Save 40% on enterprise SSDs this week only. Free shipping on orders over $99. Shop now &gt;&gt; Terms apply.</aside>
+  <div class="post-actions">Reply | Like | Share: Facebook X Reddit Email Link | Report</div>
+</article>
+<article class="post" id="post-1068">
+  <h2 class="post-title"><a href="/t/1068">Which UPS do you trust for a small rack?</a></h2>
+  <div class="post-meta">by <a class="author" href="/u/voltdrop">voltdrop</a> <time datetime="2026-10-05T12:28:00Z">Oct 5, 2026 at 12:28</time></div>
+  <div class="post-body"><p>My load is around 280 watts: a NAS, a switch, the router and one mini PC. I want at least fifteen minutes of runtime and a clean shutdown signal over USB that NUT understands. The APC units are easy to find here but the replacement batteries cost almost as much as the UPS. Any recommendations from people who have run one for a few years?</p></div>
+  <div class="post-actions">Reply | Like | Share: Facebook X Reddit Email Link | Report</div>
+</article>
+<article class="post" id="post-1075">
+  <h2 class="post-title"><a href="/t/1075">Pi-hole or AdGuard Home in 2026?</a></h2>
+  <div class="post-meta">by <a class="author" href="/u/dnsdave">dnsdave</a> <time datetime="2026-10-06T13:35:00Z">Oct 6, 2026 at 13:35</time></div>
+  <div class="post-body"><p>I have used Pi-hole since version 4 and it has been solid, but I keep reading that AdGuard Home handles encrypted upstreams and per-client rules without extra containers. For those who switched, was the migration of blocklists and local DNS records painful, and do you miss anything?</p></div>
+  <div class="post-actions">Reply | Like | Share: Facebook X Reddit Email Link | Report</div>
+</article>
+<article class="post" id="post-1082">
+  <h2 class="post-title"><a href="/t/1082">Jellyfin hardware transcoding on an N100: my settings</a></h2>
+  <div class="post-meta">by <a class="author" href="/u/quietfan">quietfan</a> <time datetime="2026-10-07T14:42:00Z">Oct 7, 2026 at 14:42</time></div>
+  <div class="post-body"><p>After a weekend of trial and error the box now handles three 4K HDR to 1080p transcodes at once. The things that mattered were passing /dev/dri into the container, enabling low power encoding, and turning tone mapping to the VPP variant. CPU sits under 30 percent. Full compose file is in the reply below.</p></div>
+  <div class="post-actions">Reply | Like | Share: Facebook X Reddit Email Link | Report</div>
+</article>
+<article class="post" id="post-1089">
+  <h2 class="post-title"><a href="/t/1089">Is it crazy to run the router as a VM?</a></h2>
+  <div class="post-meta">by <a class="author" href="/u/bridgemode">bridgemode</a> <time datetime="2026-10-08T15:49:00Z">Oct 8, 2026 at 15:49</time></div>
+  <div class="post-body"><p>I virtualised OPNsense on the same host as everything else to save power. It works well until I need to reboot the hypervisor, at which point the whole house loses internet and my family notices immediately. Thinking about moving it back to a dedicated fanless box. How do the rest of you handle maintenance windows?</p></div>
+  <div class="post-actions">Reply | Like | Share: Facebook X Reddit Email Link | Report</div>
+</article>
+<article class="post" id="post-1096">
+  <h2 class="post-title"><a href="/t/1096">Backups: restic to Backblaze B2 costs after one year</a></h2>
+  <div class="post-meta">by <a class="author" href="/u/threetwoone">threetwoone</a> <time datetime="2026-10-09T16:56:00Z">Oct 9, 2026 at 16:56</time></div>
+  <div class="post-body"><p>A year ago I asked here whether B2 was affordable for about 900 GB of photos and documents. The total for twelve months came to a little under 70 dollars including one full test restore. Pruning weekly keeps the repository from growing. Sharing the numbers because I could not find real figures when I was deciding.</p></div>
+  <aside class="ad">Advertisement. Get the HomeLab Pro newsletter: deals, giveaways and partner offers every Friday. Enter your email. Subscribe. No thanks.</aside>
+  <div class="post-actions">Reply | Like | Share: Facebook X Reddit Email Link | Report</div>
+</article>
+<article class="post" id="post-1103">
+  <h2 class="post-title"><a href="/t/1103">Docker containers cannot reach the LAN after enabling IPv6</a></h2>
+  <div class="post-meta">by <a class="author" href="/u/slash64">slash64</a> <time datetime="2026-10-10T17:03:00Z">Oct 10, 2026 at 17:03</time></div>
+  <div class="post-body"><p>As soon as I set ipv6 to true in daemon.json, containers on the default bridge lost access to anything on 192.168.1.0/24, while the internet still worked. Removing the setting fixes it. I assume it is a forwarding or firewall rule that Docker rewrites, but I cannot see which one. Has anyone traced this?</p></div>
+  <div class="post-actions">Reply | Like | Share: Facebook X Reddit Email Link | Report</div>
+</article>
+<article class="post" id="post-1110">
+  <h2 class="post-title"><a href="/t/1110">Moving from Nextcloud to plain Syncthing plus Immich</a></h2>
+  <div class="post-meta">by <a class="author" href="/u/selfhostsam">selfhostsam</a> <time datetime="2026-10-11T18:10:00Z">Oct 11, 2026 at 18:10</time></div>
+  <div class="post-body"><p>Nextcloud did everything but I only ever used file sync and photo upload, and every major upgrade cost me an evening. I split it into Syncthing for documents and Immich for photos three months ago. Fewer features, far less maintenance, and the phone battery lasts longer. Happy to answer questions about the migration.</p></div>
+  <div class="post-actions">Reply | Like | Share: Facebook X Reddit Email Link | Report</div>
+</article>
+<article class="post" id="post-1117">
+  <h2 class="post-title"><a href="/t/1117">Noisy 40mm fans in a Brocade ICX6450: replacement options</a></h2>
+  <div class="post-meta">by <a class="author" href="/u/rackrash">rackrash</a> <time datetime="2026-10-12T19:17:00Z">Oct 12, 2026 at 19:17</time></div>
+  <div class="post-body"><p>The switch is great for the price but it screams. I measured 58 dB at one metre. I have seen people fit Noctua fans with a resistor so the switch does not report a fan failure. Does anyone have the exact resistor value, and did the temperatures stay acceptable under PoE load?</p></div>
+  <div class="post-actions">Reply | Like | Share: Facebook X Reddit Email Link | Report</div>
+</article>
+<article class="post" id="post-1124">
+  <h2 class="post-title"><a href="/t/1124">Home Assistant on a VM versus a dedicated Pi</a></h2>
+  <div class="post-meta">by <a class="author" href="/u/zigbee_zoe">zigbee_zoe</a> <time datetime="2026-10-13T08:24:00Z">Oct 13, 2026 at 08:24</time></div>
+  <div class="post-body"><p>My Pi 4 with an SD card died for the second time, so I moved Home Assistant OS into a VM and passed the Zigbee dongle through. Restarts are quicker and snapshots before updates have already saved me once. The only downside so far is that the USB passthrough needed a udev rule to survive host reboots.</p></div>
+  <div class="post-actions">Reply | Like | Share: Facebook X Reddit Email Link | Report</div>
+</article>
+<article class="post" id="post-1131">
+  <h2 class="post-title"><a href="/t/1131">Tailscale exit node is slow, direct connection never established</a></h2>
+  <div class="post-meta">by <a class="author" href="/u/derp_relay">derp_relay</a> <time datetime="2026-10-14T09:31:00Z">Oct 14, 2026 at 09:31</time></div>
+  <div class="post-body"><p>From my phone on mobile data the connection to my exit node at home always goes through a relay and tops out around 8 Mbit. The router is behind CGNAT from my ISP. I opened UDP 41641 anyway, with no change. Is there anything left to try short of renting a small VPS as a relay of my own?</p></div>
+  <aside class="ad">SPONSORED - Upgrade your rack today! Save 40% on enterprise SSDs this week only. Free shipping on orders over $99. Shop now &gt;&gt; Terms apply.</aside>
+  <div class="post-actions">Reply | Like | Share: Facebook X Reddit Email Link | Report</div>
+</article>
+<article class="post" id="post-1138">
+  <h2 class="post-title"><a href="/t/1138">What is everyone using for secrets in docker compose?</a></h2>
+  <div class="post-meta">by <a class="author" href="/u/envfile">envfile</a> <time datetime="2026-10-15T10:38:00Z">Oct 15, 2026 at 10:38</time></div>
+  <div class="post-body"><p>Right now my passwords live in .env files next to each compose file, which means they also sit in my backup in plain text. I looked at Docker secrets, SOPS with age, and Vault, and Vault feels like far too much for a single host. Curious what small setups actually settle on.</p></div>
+  <div class="post-actions">Reply | Like | Share: Facebook X Reddit Email Link | Report</div>
+</article>
+<article class="post" id="post-1145">
+  <h2 class="post-title"><a href="/t/1145">Ceph on three mini PCs with one NVMe each: a cautionary tale</a></h2>
+  <div class="post-meta">by <a class="author" href="/u/placementgroup">placementgroup</a> <time datetime="2026-10-16T11:45:00Z">Oct 16, 2026 at 11:45</time></div>
+  <div class="post-body"><p>It worked for six months and performance was fine for VMs. Then one consumer NVMe wore out and during the rebalance a second one started throwing errors. I did not lose data, but only because the backups were current. Consumer drives without power loss protection are simply not made for Ceph&#x27;s write pattern.</p></div>
+  <div class="post-actions">Reply | Like | Share: Facebook X Reddit Email Link | Report</div>
+</article>
+<article class="post" id="post-1152">
+  <h2 class="post-title"><a href="/t/1152">Reverse proxy: Caddy made me delete 200 lines of nginx config</a></h2>
+  <div class="post-meta">by <a class="author" href="/u/tls_tom">tls_tom</a> <time datetime="2026-10-17T12:52:00Z">Oct 17, 2026 at 12:52</time></div>
+  <div class="post-body"><p>I put off switching for years because the nginx setup worked. Last week I rewrote it in Caddy and the whole file is 40 lines, with certificates handled automatically including the wildcard through DNS challenge. The one thing I had to look up was how to pass the real client IP to the apps behind it.</p></div>
+  <div class="post-actions">Reply | Like | Share: Facebook X Reddit Email Link | Report</div>
+</article>
+<article class="post" id="post-1159">
+  <h2 class="post-title"><a href="/t/1159">Power draw of an idle Dell R730 versus two mini PCs</a></h2>
+  <div class="post-meta">by <a class="author" href="/u/wattwatcher">wattwatcher</a> <time datetime="2026-10-18T13:59:00Z">Oct 18, 2026 at 13:59</time></div>
+  <div class="post-body"><p>I measured at the wall for a week each. The R730 with two CPUs and eight drives idles at 142 watts. The pair of mini PCs running the same VMs idles at 23 watts combined. At my electricity price the difference pays for the mini PCs in about fourteen months, and the office is quiet now.</p></div>
+  <div class="post-actions">Reply | Like | Share: Facebook X Reddit Email Link | Report</div>
+</article>
+<article class="post" id="post-1166">
+  <h2 class="post-title"><a href="/t/1166">Unifi controller in a container keeps losing adoption</a></h2>
+  <div class="post-meta">by <a class="author" href="/u/apmesh">apmesh</a> <time datetime="2026-10-19T14:06:00Z">Oct 19, 2026 at 14:06</time></div>
+  <div class="post-body"><p>Every time the container is recreated, the access points show as disconnected until I SSH into each one and run set-inform again. The inform host override is set to the host IP. I suspect the container is advertising its internal address somewhere. Where does the controller store that?</p></div>
+  <aside class="ad">Advertisement. Get the HomeLab Pro newsletter: deals, giveaways and partner offers every Friday. Enter your email. Subscribe. No thanks.</aside>
+  <div class="post-actions">Reply | Like | Share: Facebook X Reddit Email Link | Report</div>
+</article>
+<article class="post" id="post-1173">
+  <h2 class="post-title"><a href="/t/1173">Paperless-ngx: scanner to archive workflow that finally works</a></h2>
+  <div class="post-meta">by <a class="author" href="/u/duplexdan">duplexdan</a> <time datetime="2026-10-20T15:13:00Z">Oct 20, 2026 at 15:13</time></div>
+  <div class="post-body"><p>The scanner now sends PDFs to an SMB share, paperless consumes them, runs OCR in German and English, and a few matching rules assign correspondents and tags. Two hundred documents in, I have corrected maybe ten by hand. The trick was scanning at 300 dpi; at 200 the OCR missed too many account numbers.</p></div>
+  <div class="post-actions">Reply | Like | Share: Facebook X Reddit Email Link | Report</div>
+</article>
+<article class="post" id="post-1180">
+  <h2 class="post-title"><a href="/t/1180">TrueNAS Scale upgrade broke my apps, how do I roll back?</a></h2>
+  <div class="post-meta">by <a class="author" href="/u/bootenv">bootenv</a> <time datetime="2026-10-21T16:20:00Z">Oct 21, 2026 at 16:20</time></div>
+  <div class="post-body"><p>After upgrading to the newest release, none of the apps start and the pool for them shows as not configured. I still have the previous boot environment. Is it safe to activate it and reboot, or will the app datasets already have been migrated in a way the older version cannot read?</p></div>
+  <div class="post-actions">Reply | Like | Share: Facebook X Reddit Email Link | Report</div>
+</article>
+<article class="post" id="post-1187">
+  <h2 class="post-title"><a href="/t/1187">Monitoring: is Prometheus plus Grafana overkill for four machines?</a></h2>
+  <div class="post-meta">by <a class="author" href="/u/scrape_interval">scrape_interval</a> <time datetime="2026-10-22T17:27:00Z">Oct 22, 2026 at 17:27</time></div>
+  <div class="post-body"><p>I set up the full stack and it is lovely, but it uses more memory than two of the services it monitors. All I really look at is disk space, temperatures and whether backups ran. Tempted to replace it with something tiny that just sends me a message when a check fails. What do people with small setups use?</p></div>
+  <div class="post-actions">Reply | Like | Share: Facebook X Reddit Email Link | Report</div>
+</article>
+<article class="post" id="post-1194">
+  <h2 class="post-title"><a href="/t/1194">Label printer recommendations for cables and drives</a></h2>
+  <div class="post-meta">by <a class="author" href="/u/heatshrink">heatshrink</a> <time datetime="2026-10-23T18:34:00Z">Oct 23, 2026 at 18:34</time></div>
+  <div class="post-body"><p>My current labels peel off anything warm within a few months. I am looking for a printer that takes laminated tape and can do the wrap-around style for patch cables. Budget is modest and I would rather not be locked into a phone app that needs an account.</p></div>
+  <div class="post-actions">Reply | Like | Share: Facebook X Reddit Email Link | Report</div>
+</article>
+<article class="post" id="post-1201">
+  <h2 class="post-title"><a href="/t/1201">VLAN for IoT devices: casting stops working across subnets</a></h2>
+  <div class="post-meta">by <a class="author" href="/u/mdns_reflector">mdns_reflector</a> <time datetime="2026-10-24T19:41:00Z">Oct 24, 2026 at 19:41</time></div>
+  <div class="post-body"><p>I moved the TV and speakers to their own VLAN and now phones on the main network cannot find them. I enabled the mDNS repeater on the router and allowed the established traffic back, and discovery works for a minute after boot and then stops. Is there a known firewall rule set that makes this reliable?</p></div>
+  <aside class="ad">SPONSORED - Upgrade your rack today! Save 40% on enterprise SSDs this week only. Free shipping on orders over $99. Shop now &gt;&gt; Terms apply.</aside>
+  <div class="post-actions">Reply | Like | Share: Facebook X Reddit Email Link | Report</div>
+</article>
+<article class="post" id="post-1208">
+  <h2 class="post-title"><a href="/t/1208">One year with a used Optiplex as my only server: review</a></h2>
+  <div class="post-meta">by <a class="author" href="/u/sff_fan">sff_fan</a> <time datetime="2026-10-25T08:48:00Z">Oct 25, 2026 at 08:48</time></div>
+  <div class="post-body"><p>Bought for 110 euros with an i5-8500 and 16 GB, later upgraded to 32. It runs fourteen containers and two VMs, draws 11 watts idle, and has not crashed once. The only real limit is two drive bays. If you are starting out, I would pick something like this over a Raspberry Pi every time.</p></div>
+  <div class="post-actions">Reply | Like | Share: Facebook X Reddit Email Link | Report</div>
+</article>
+</main>
+<footer>You must log in or register to reply here. Similar threads | Latest posts | Forum statistics | Contact us | Terms and rules | Privacy policy | Help | RSS</footer>
+<div class="cookie-banner">We use cookies to personalise content and to keep you logged in. By continuing to use this site, you are consenting to our use of cookies. Accept | Learn more</div>
+</body></html>

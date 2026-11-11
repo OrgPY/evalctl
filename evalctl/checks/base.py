@@ -40,6 +40,7 @@ class Context:
     config: Config
     worker: Optional[str] = None
     inputs: Optional[Path] = None  # the task's input files, for input/output relation checks
+    trajectories: List[Path] = field(default_factory=list)  # the agent's tool-call logs, oldest first
 
 
 class Check:

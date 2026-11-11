@@ -53,13 +53,63 @@ CREATE TABLE IF NOT EXISTS feedback (
 """
 
 
+# Columns added after v0. `mode` is skill | run | bench; `extra` is a JSON object.
+ADDED_COLUMNS = {"agent": "TEXT", "trajectory": "TEXT", "profile": "TEXT", "mode": "TEXT", "extra": "TEXT"}
+
+
 def connect() -> sqlite3.Connection:
     p = paths.db_path()
     p.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(p), timeout=30)
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
+    have = {r["name"] for r in conn.execute("PRAGMA table_info(runs)")}
+    for col, kind in ADDED_COLUMNS.items():
+        if col not in have:
+            conn.execute(f"ALTER TABLE runs ADD COLUMN {col} {kind}")
     return conn
+
+
+def new_task_id() -> int:
+    with closing(connect()) as conn:
+        return conn.execute("SELECT COALESCE(MAX(task_id), 0) FROM runs").fetchone()[0] + 1
+
+
+def get_run(run_id: int) -> Optional[Dict[str, Any]]:
+    with closing(connect()) as conn:
+        row = conn.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone()
+    if row is None:
+        return None
+    d = dict(row)
+    d["results"] = json.loads(d["results"])
+    d["extra"] = json.loads(d["extra"]) if d.get("extra") else {}
+    return d
+
+
+def update_extra(run_id: int, **values: Any) -> None:
+    with closing(connect()) as conn, conn:
+        row = conn.execute("SELECT extra FROM runs WHERE id=?", (run_id,)).fetchone()
+        if row is None:
+            return
+        extra = json.loads(row["extra"]) if row["extra"] else {}
+        extra.update(values)
+        conn.execute("UPDATE runs SET extra=? WHERE id=?", (json.dumps(extra, ensure_ascii=False), run_id))
+
+
+def runs_for(config_name: str, status: Optional[str] = None, limit: int = 200) -> List[Dict[str, Any]]:
+    """Newest first."""
+    q, args = "SELECT * FROM runs WHERE config=?", [config_name]
+    if status:
+        q, args = q + " AND status=?", args + [status]
+    with closing(connect()) as conn:
+        rows = conn.execute(q + " ORDER BY id DESC LIMIT ?", args + [limit]).fetchall()
+    out = []
+    for row in rows:
+        d = dict(row)
+        d["results"] = json.loads(d["results"])
+        d["extra"] = json.loads(d["extra"]) if d.get("extra") else {}
+        out.append(d)
+    return out
 
 
 def plan_round(workdir: Path, config_name: str, config_sha: str, digest: str,
@@ -83,13 +133,19 @@ def plan_round(workdir: Path, config_name: str, config_sha: str, digest: str,
 
 def record(workdir: Path, config_name: str, config_sha: Optional[str], digest: Optional[str],
            task_id: Optional[int], round_no: Optional[int], status: str, source: str,
-           worker: Optional[str], duration: float, results: List[Dict[str, Any]]) -> None:
+           worker: Optional[str], duration: float, results: List[Dict[str, Any]],
+           agent: Optional[str] = None, trajectory: Optional[str] = None, profile: Optional[str] = None,
+           mode: str = "skill", extra: Optional[Dict[str, Any]] = None) -> int:
+    """-> the run id (what `evalctl explain` takes)."""
     with closing(connect()) as conn, conn:
-        conn.execute(
+        cur = conn.execute(
             "INSERT INTO runs (ts, dir, config, config_sha, artifacts_digest, task_id, round, status,"
-            " source, worker, duration, results) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            " source, worker, duration, results, agent, trajectory, profile, mode, extra)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (time.time(), str(workdir), config_name, config_sha, digest, task_id, round_no, status,
-             source, worker, duration, json.dumps(results, ensure_ascii=False)))
+             source, worker, duration, json.dumps(results, ensure_ascii=False), agent, trajectory,
+             profile, mode, json.dumps(extra or {}, ensure_ascii=False)))
+        return int(cur.lastrowid)
 
 
 def last_results(workdir: Path, config_name: str, config_sha: str, digest: str) -> Optional[Tuple[str, List[Dict[str, Any]]]]:
@@ -137,7 +193,7 @@ def feedback_summary(config_name: Optional[str] = None) -> Dict[str, Dict[str, A
 
 
 def stats(only_config: Optional[str] = None) -> Dict[str, Any]:
-    from . import config as cfg, receipt  # late: avoid import cycle
+    from . import config as cfg, loop as lp, receipt  # late: avoid import cycle
 
     with closing(connect()) as conn:
         rows = conn.execute("SELECT * FROM runs ORDER BY id").fetchall()
@@ -160,18 +216,20 @@ def stats(only_config: Optional[str] = None) -> Dict[str, Any]:
         if not d.is_dir():
             return True  # directory is gone; the pass is all we know
         try:
-            _, cpath, _ = cfg.select(str(d), None) if cfg.find_pointer(d) else (None, None, None)
+            pointer = cfg.find_pointer(d)
+            _, cpath, _ = cfg.select(str(d), None) if pointer else (None, None, None)
             conf = cfg.load(cpath, d) if cpath else None
+            loop = lp.from_pointer(pointer) if pointer else None
         except cfg.ConfigError:
-            conf = None
-        return receipt.verify(d, conf)[0]
+            conf = loop = None
+        return receipt.verify(d, conf, loop)[0]
 
     per: Dict[str, Dict[str, Any]] = {}
     for tid, runs in sorted(tasks.items()):
         name = runs[-1]["config"]
         s = per.setdefault(name, {"tasks": 0, "passed": 0, "first_round_pass": 0, "rounds": [],
                                   "with_receipt": 0, "hook_caught": 0, "fails": Counter(),
-                                  "runs": 0})
+                                  "runs": 0, "needs_human": 0, "votes": {}})
         final = runs[-1]
         s["tasks"] += 1
         s["runs"] += len(runs)
@@ -184,9 +242,17 @@ def stats(only_config: Optional[str] = None) -> Dict[str, Any]:
                 s["first_round_pass"] += 1
             if latest_in_dir[final["dir"]] != tid or receipt_still_valid(final):
                 s["with_receipt"] += 1
+        if final["extra"] and json.loads(final["extra"]).get("needs_human"):
+            s["needs_human"] += 1
         counted = set()
         for r in runs:
             for c in json.loads(r["results"]):
+                for crit, v in ((c.get("meta") or {}).get("votes") or {}).items():
+                    if v.get("n", 1) > 1:  # only repeated gradings say anything about consistency
+                        a = s["votes"].setdefault(f"{c['id']}.{crit}", {"runs": 0, "agreement": 0.0, "unstable": 0})
+                        a["runs"] += 1
+                        a["agreement"] += max(v["pass"], v["n"] - v["pass"]) / v["n"]
+                        a["unstable"] += v.get("verdict") == "unstable"
                 if c.get("status") == "fail" and (r["round"], c["id"]) not in counted:
                     counted.add((r["round"], c["id"]))
                     s["fails"][c["id"]] += 1
@@ -205,6 +271,11 @@ def stats(only_config: Optional[str] = None) -> Dict[str, Any]:
             "tasks_first_checked_by_hook": s["hook_caught"],
             "config_error_runs": errors.get(name, 0),
             "top_failing_checks": [{"id": cid, "failed_rounds": k} for cid, k in s["fails"].most_common(5)],
+            "tasks_needing_human_judgement": s["needs_human"],
+            # per rubric item: how often its repeated gradings agreed with each other
+            "rubric_consistency": {k: {"runs": v["runs"], "consistency": v["agreement"] / v["runs"],
+                                       "unstable_runs": v["unstable"]}
+                                   for k, v in sorted(s["votes"].items())},
         }
     for name, fb in feedback_summary(only_config).items():
         if name in out["configs"]:

@@ -1,0 +1,42 @@
+{
+  "status": "fail",
+  "passed": false,
+  "round": 1,
+  "max_rounds": 3,
+  "checks": [
+    {
+      "id": "post_count",
+      "type": "schema",
+      "summary": "1 problem(s)",
+      "failures": [
+        "posts.jsonl: 5 record(s), expected at least 20"
+      ],
+      "hint": "Too few usually means pagination stopped early; scrape the remaining pages.",
+      "status": "fail"
+    },
+    {
+      "id": "posts_file",
+      "type": "file",
+      "status": "pass",
+      "summary": "ok"
+    },
+    {
+      "id": "posts_schema",
+      "type": "file",
+      "status": "pass",
+      "summary": "ok"
+    },
+    {
+      "id": "every_post_has_url",
+      "type": "file",
+      "status": "pass",
+      "summary": "ok"
+    },
+    {
+      "id": "unique_urls",
+      "type": "file",
+      "status": "pass",
+      "summary": "ok"
+    }
+  ]
+}

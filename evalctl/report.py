@@ -18,7 +18,11 @@ def overall(results: List[Result]) -> str:
     return PASS
 
 
-def next_step(status: str, round_no: Optional[int], max_rounds: int) -> str:
+def next_step(status: str, round_no: Optional[int], max_rounds: int, mode: str = "skill",
+              receipt: bool = True) -> str:
+    """`mode` is skill (the agent called check itself) or run / bench (evalctl drives the agent)."""
+    if status == PASS and not receipt:
+        return "All checks passed. No receipt yet: the repeat runs decide whether one is written."
     if status == PASS:
         return "All checks passed. Receipt written; the output can be delivered as is. Any further edit invalidates the receipt."
     if status == ERROR:
@@ -27,12 +31,17 @@ def next_step(status: str, round_no: Optional[int], max_rounds: int) -> str:
     if round_no is not None and round_no >= max_rounds:
         return (f"Round {round_no} of {max_rounds}: round limit reached. Stop iterating. Report the FAIL "
                 "items above to the user exactly as listed. Do not deliver this output as passing.")
+    if mode != "skill":
+        return (f"Round {round_no} of {max_rounds}. Fix only the FAIL items above, leave everything that "
+                "passed untouched, then stop. The check runs again automatically; do not run evalctl yourself.")
     return (f"Round {round_no} of {max_rounds}. Fix only the FAIL items above, leave everything that "
             "passed untouched, then run `evalctl check` again.")
 
 
 def render_text(config: Config, workdir: Any, results: List[Result], status: str,
-                round_no: Optional[int], receipt_path: Optional[str]) -> str:
+                round_no: Optional[int], receipt_path: Optional[str], mode: str = "skill",
+                notes: Optional[List[str]] = None, run_id: Optional[int] = None,
+                receipt_expected: bool = True) -> str:
     n_fail = sum(r.status == FAIL for r in results)
     n_err = sum(r.status == ERROR for r in results)
     n_skip = sum(r.status == SKIPPED for r in results)
@@ -46,7 +55,8 @@ def render_text(config: Config, workdir: Any, results: List[Result], status: str
         counts += f", {n_skip} skipped"
     lines = [
         f"evalctl check: {head}  ({counts})",
-        f"config: {config.name}   dir: {workdir}" + (f"   round: {round_no}/{config.max_rounds}" if round_no else ""),
+        f"config: {config.name}   dir: {workdir}" + (f"   round: {round_no}/{config.max_rounds}" if round_no else "")
+        + (f"   run: #{run_id}" if run_id else ""),
         "",
     ]
     order = {ERROR: 0, FAIL: 1, SKIPPED: 2, PASS: 3}
@@ -65,15 +75,17 @@ def render_text(config: Config, workdir: Any, results: List[Result], status: str
         if note:
             lines.append(f"    note: {note}")
     lines.append("")
+    for n in notes or []:
+        lines.append(f"note: {n}")
     if receipt_path:
         lines.append(f"receipt: {receipt_path}")
-    lines.append(next_step(status, round_no, config.max_rounds))
+    lines.append(next_step(status, round_no, config.max_rounds, mode, receipt_expected))
     return "\n".join(lines)
 
 
 def to_json(config: Config, workdir: Any, results: List[Result], status: str,
-            round_no: Optional[int], receipt_path: Optional[str], text: str) -> Dict[str, Any]:
-    return {
+            round_no: Optional[int], receipt_path: Optional[str], text: str, **more: Any) -> Dict[str, Any]:
+    out = {
         "status": status,
         "passed": status == PASS,
         "config": {"name": config.name, "path": str(config.path), "sha256": config.sha256},
@@ -82,6 +94,8 @@ def to_json(config: Config, workdir: Any, results: List[Result], status: str,
         "max_rounds": config.max_rounds,
         "receipt": receipt_path,
         "checks": [r.to_dict() for r in results],
-        "next_step": next_step(status, round_no, config.max_rounds),
+        "next_step": text.splitlines()[-1] if text else "",
         "text": text,
     }
+    out.update(more)
+    return out

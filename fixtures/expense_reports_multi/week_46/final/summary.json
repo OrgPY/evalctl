@@ -1,0 +1,23 @@
+{
+  "period_start": "2026-11-09",
+  "period_end": "2026-11-13",
+  "count": 7,
+  "total": 489.1,
+  "by_category": [
+    {
+      "category": "Meals",
+      "items": 3,
+      "amount": 173.45
+    },
+    {
+      "category": "Travel",
+      "items": 2,
+      "amount": 159.65
+    },
+    {
+      "category": "Software",
+      "items": 2,
+      "amount": 156.0
+    }
+  ]
+}
