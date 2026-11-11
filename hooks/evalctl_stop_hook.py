@@ -2,7 +2,7 @@
 """Claude Code Stop hook: no valid evalctl receipt, no stopping.
 
 Input and output follow https://code.claude.com/docs/en/hooks (Stop):
-  stdin   JSON with `cwd`, `stop_hook_active`, ...
+  stdin   JSON with `cwd`, `stop_hook_active`, `transcript_path`, ...
   stdout  nothing                                -> Claude may stop
           {"decision": "block", "reason": "..."} -> Claude continues, `reason` is shown to it
           {"systemMessage": "..."}               -> Claude may stop, the user sees a warning
@@ -107,7 +107,10 @@ def main():
                                 stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, timeout=120)
         if verify.returncode == 0:
             allow()
-        check = subprocess.run(evalctl + ["check", "--dir", root, "--json", "--source", "hook"],
+        # The session transcript is the trajectory that action_policy checks read.
+        transcript = data.get("transcript_path")
+        extra = ["--trajectory", transcript] if transcript and os.path.isfile(os.path.expanduser(transcript)) else []
+        check = subprocess.run(evalctl + ["check", "--dir", root, "--json", "--source", "hook"] + extra,
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                stdin=subprocess.DEVNULL, timeout=540)
     except (subprocess.TimeoutExpired, OSError) as e:

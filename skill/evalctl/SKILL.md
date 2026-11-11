@@ -24,6 +24,8 @@ Stop. Tell the user the output did not pass and paste the remaining failed items
 - Do not argue that a check is wrong, and do not work around it. If you think a rule is mistaken, say so to the user after reporting the failure; the user decides.
 - Never create, edit or delete anything in `.eval/`, the `.evalctl.yaml` file, or the check configs in `~/.evalctl/`.
 - Fix the output itself. Do not pad, duplicate, invent or delete data just to satisfy a check.
-- `ERROR` (exit code 2) means evalctl itself could not run the checks. That is a setup problem: report it to the user and stop; do not treat it as a pass.
+- `ERROR` (exit code 2) means evalctl itself could not run the checks, or found a problem in the check rules. That is a setup problem: report it to the user and stop; do not treat it as a pass.
+- Lines starting with `note:` are for the user. They need no fix from you; pass them on when you report.
+- If the instruction that brought you here says the check runs automatically (you were started by `evalctl run`), do not run `evalctl check` yourself: fix the listed items and stop.
 
 Exit codes: 0 pass, 1 failures, 2 setup error. `evalctl check --json` gives the same result as JSON.

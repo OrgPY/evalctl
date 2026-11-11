@@ -1,0 +1,7 @@
+{
+  "category": "checker_false_positive",
+  "steps": [
+    4
+  ],
+  "why": "The report is right. The placeholder check trips over a vendor that is really called \"TBD Logistics\"."
+}

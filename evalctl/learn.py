@@ -179,6 +179,7 @@ class Candidate:
     draft: str = ""
     alternatives: List[Dict[str, Any]] = field(default_factory=list)  # looser variants, tried in order
     from_edit: bool = False    # proposed from an edit: must fail on the draft or be discarded
+    key: str = ""              # same feature of the same (globbed) file, whichever final it was seen in
 
     def to_dict(self) -> Dict[str, Any]:
         return {"id": self.id, "kind": self.kind, "scope": self.scope, "enabled": self.enabled,
@@ -247,23 +248,29 @@ def _induce(values: List[Any]) -> Dict[str, Any]:
     return out
 
 
-def _schema_check(path: Path, pattern: str) -> Optional[Tuple[Dict[str, Any], str]]:
+def _schema_check(path: Any, pattern: str) -> Optional[Tuple[Dict[str, Any], str]]:
+    """Schema that every given file satisfies. `path` is one file or, for several final outputs, a list."""
+    files = path if isinstance(path, list) else [path]
     try:
-        fmt = detect_format(path.name, None)
+        fmt = detect_format(files[0].name, None)
     except ConfigError:
         return None
-    loaded = load_records(path, path.name, fmt)
-    if loaded.problems:
+    loaded = [load_records(f, f.name, fmt) for f in files]
+    if any(l.problems for l in loaded):
         return None
     check: Dict[str, Any] = {"type": "schema", "file": pattern}
-    if fmt == "json" and not loaded.is_record_list:
-        check["schema"] = _induce([loaded.document])
-        return check, f"field names, nesting and value types of {path.name}"
-    recs = [r for _, r in loaded.records]
-    if not recs or not all(isinstance(r, dict) for r in recs):
+    names = files[0].name if len(files) == 1 else f"{len(files)} files matching {pattern}"
+    if fmt == "json" and not any(l.is_record_list for l in loaded):
+        check["schema"] = _induce([l.document for l in loaded])
+        return check, f"field names, nesting and value types of {names}"
+    per_file = [[r for _, r in l.records] for l in loaded]
+    recs = [r for rs in per_file for r in rs]
+    if not all(per_file) or not all(isinstance(r, dict) for r in recs):
         return None
     if fmt == "csv":
-        check["columns"] = list(loaded.columns or [])
+        columns = [list(l.columns or []) for l in loaded]
+        if all(c == columns[0] for c in columns):
+            check["columns"] = columns[0]
         for r in recs:  # cells are strings; type a column as number when every cell is one
             for k, v in list(r.items()):
                 n = parse_number(v) if isinstance(v, str) and "," not in v else None
@@ -271,12 +278,12 @@ def _schema_check(path: Path, pattern: str) -> Optional[Tuple[Dict[str, Any], st
                     r[k] = float(n.value)
     check["record_schema"] = _induce(recs)
     check["min_records"] = 1
-    unique = [k for k in recs[0] if ID_LIKE.search(str(k)) and len(recs) >= 2
-              and all(k in r and isinstance(r[k], (str, int)) for r in recs)
-              and len({r[k] for r in recs}) == len(recs)]
+    unique = [k for k in recs[0] if ID_LIKE.search(str(k)) and all(
+        len(rs) >= 2 and all(k in r and isinstance(r[k], (str, int)) for r in rs)
+        and len({r[k] for r in rs}) == len(rs) for rs in per_file)]
     if unique:
         check["unique"] = unique
-    return check, (f"columns and value types of the {len(recs)} record(s) in {path.name}"
+    return check, (f"columns and value types of the {len(recs)} record(s) in {names}"
                    + (f"; {', '.join(unique)} never repeat" if unique else ""))
 
 
@@ -290,6 +297,22 @@ def propose(final: Path, inputs: Optional[Path]) -> List[Candidate]:
                 input_tables.append((f, t))
 
     for f in list_files(final):
+        _propose_file(final, inputs, f, input_tables, out)
+    return out
+
+
+def _propose_file(final: Path, inputs: Optional[Path], f: str, input_tables: List[Any], out: List[Candidate]) -> None:
+    first = len(out)
+    path, pat, s = final / f, globify(f), slug(f)
+    try:
+        _propose_for(final, inputs, f, input_tables, out)
+    finally:
+        for c in out[first:]:
+            c.key = f"{pat}|{c.id[len(s):]}"
+
+
+def _propose_for(final: Path, inputs: Optional[Path], f: str, input_tables: List[Any], out: List[Candidate]) -> None:
+    if True:
         path, pat, s = final / f, globify(f), slug(f)
         named = f"{f}" if pat == f else f"{f} (as {pat})"
         out.append(Candidate(f"{s}_exists", "structure", GENERAL,
@@ -298,7 +321,7 @@ def propose(final: Path, inputs: Optional[Path]) -> List[Candidate]:
                              f"the final output contains {named}"))
         text = read_text(path)
         if text is None:
-            continue
+            return
         is_records = path.suffix.lower() in RECORD_EXTS
 
         if is_records:
@@ -341,7 +364,7 @@ def propose(final: Path, inputs: Optional[Path]) -> List[Candidate]:
                                   "hint": "Recompute the total row from the rows above it."},
                                  f"in {f}, the total row of each table equals the sum of the other rows"))
         if inputs is None:
-            continue
+            return
         nums = file_numbers(path, text)
         if nums:
             base = {"type": "numbers_in_inputs", "file": pat,
@@ -361,7 +384,6 @@ def propose(final: Path, inputs: Optional[Path]) -> List[Candidate]:
                         {"type": "covers_input_values", "file": pat, "input": globify(src), "column": col,
                          "hint": f"Every {col} that occurs in {src} must appear in the output."},
                         f"all {len(vals)} distinct value(s) of {col} in {src} appear in {f}"))
-    return out
 
 
 def _phrases(before: str, after: str) -> Tuple[List[str], List[str], bool]:
@@ -433,18 +455,12 @@ def learn(inputs: Optional[Path], draft: Path, final: Path, name: str) -> Dict[s
     discarded: List[Dict[str, Any]] = []
     drop = lambda c, reason: discarded.append({"id": c.id, "reason": reason, "check": c.check})
 
-    existing: List[Dict[str, Any]] = []
+    existing = _existing_checks(name)
     stale: List[Dict[str, str]] = []
-    cpath = paths.checks_dir() / f"{name}.yaml"
-    if cpath.is_file():
-        try:
-            raw = yaml.safe_load(cpath.read_text(encoding="utf-8")) or {}
-            existing = [c for c in (raw.get("checks") or []) if isinstance(c, dict)]
-        except yaml.YAMLError:
-            existing = []
+    if existing:
         for c in existing:
-            if c.get("type") in ("llm_rubric", "shell", "python"):
-                continue  # not re-run here: they cost money or run arbitrary code
+            if c.get("type") in ("llm_rubric", "shell", "python", "action_policy"):
+                continue  # not re-run here: they cost money, run arbitrary code or need a trajectory
             r = run_check(c, final, inputs, str(c.get("id", "?")))
             if r.status != PASS:
                 stale.append({"id": str(c.get("id", "?")), "reason": _why(r)})
@@ -533,6 +549,174 @@ def learn(inputs: Optional[Path], draft: Path, final: Path, name: str) -> Dict[s
     }
 
 
+# ---------------------------------------------------------------- several finals
+
+def _existing_checks(name: str) -> List[Dict[str, Any]]:
+    cpath = paths.checks_dir() / f"{name}.yaml"
+    if not cpath.is_file():
+        return []
+    try:
+        raw = yaml.safe_load(cpath.read_text(encoding="utf-8")) or {}
+    except yaml.YAMLError:
+        return []
+    return [c for c in (raw.get("checks") or []) if isinstance(c, dict)] if isinstance(raw, dict) else []
+
+
+def _count_features(finals: List[Path]) -> List[Dict[str, Any]]:
+    """Things that are a plain count in each final: records per file, files per numbered pattern."""
+    feats: Dict[str, Dict[str, Any]] = {}
+    for i, final in enumerate(finals):
+        by_pattern: Dict[str, List[str]] = {}
+        for f in list_files(final):
+            by_pattern.setdefault(globify(f), []).append(f)
+        for pat, files in by_pattern.items():
+            if "[0-9]" in pat:
+                ft = feats.setdefault(f"{pat}|_file_count", {
+                    "id": f"{slug(pat.replace('[0-9]', 'n'))}_file_count", "what": f"number of files matching {pat}",
+                    "check": lambda n, pat=pat: {"type": "file", "path": pat, "min_count": n, "max_count": n},
+                    "values": [0] * len(finals)})
+                ft["values"][i] = len(files)
+            path = final / files[0]
+            if len(files) == 1 and path.suffix.lower() in RECORD_EXTS:
+                try:
+                    loaded = load_records(path, path.name, detect_format(path.name, None))
+                except ConfigError:
+                    continue
+                if loaded.problems or not loaded.is_record_list:
+                    continue
+                ft = feats.setdefault(f"{pat}|_record_count", {
+                    "id": f"{slug(pat.replace('[0-9]', 'n'))}_record_count", "what": f"number of records in {pat}",
+                    "check": lambda n, pat=pat: {"type": "schema", "file": pat, "min_records": n, "max_records": n},
+                    "values": [None] * len(finals)})
+                ft["values"][i] = len(loaded.records)
+    return [f for f in feats.values() if all(v is not None for v in f["values"])]
+
+
+def learn_finals(finals: List[Path], inputs: List[Optional[Path]], name: str) -> Dict[str, Any]:
+    """Several corrected outputs of the same workflow, no drafts.
+
+    A feature becomes a candidate rule only when it holds in every final. What differs between
+    the finals is case-specific: it is listed, and no check is proposed for it. An exact count
+    that happens to be the same everywhere is kept as a case-specific candidate, disabled.
+    """
+    n = len(finals)
+    existing = _existing_checks(name)
+    groups: Dict[str, List[Tuple[int, Candidate]]] = {}
+    for i, (final, inp) in enumerate(zip(finals, inputs)):
+        for c in propose(final, inp):
+            groups.setdefault(c.key, []).append((i, c))
+
+    def holds(check: Dict[str, Any], cid: str) -> List[Result]:
+        return [run_check(check, f, inp, cid) for f, inp in zip(finals, inputs)]
+
+    kept: List[Candidate] = []
+    discarded: List[Dict[str, Any]] = []
+    inconsistent: List[Dict[str, Any]] = []
+    for key, group in groups.items():
+        c = group[0][1]
+        seen = sorted({i for i, _ in group})
+        if any(_same(c.check, e) for e in existing):
+            discarded.append({"id": c.id, "reason": f"already in config {name}", "check": c.check})
+            continue
+        variants = [(c.check, "")]
+        pat, suffix = key.split("|", 1)
+        if suffix == "_structure" and len(seen) == n:
+            merged = _schema_check([sorted(f.glob(pat))[0] for f in finals if sorted(f.glob(pat))], pat)
+            if merged:
+                variants.append((dict(merged[0], hint=c.check.get("hint")), merged[1]))
+        if suffix == "_sections" and len(seen) == n:
+            common = [h for h in c.check["must"] if all(h in o.check["must"] for _, o in group)]
+            for i, o in group:
+                for h in o.check["must"]:
+                    if h not in common and not any(x["id"] == f"{c.id}:{h}" for x in inconsistent):
+                        has = [j + 1 for j, o2 in group if h in o2.check["must"]]
+                        inconsistent.append({
+                            "id": f"{c.id}:{h}", "kind": "structure", "scope": SPECIFIC,
+                            "feature": f"section heading \"{h}\" in {pat}", "holds_in": has,
+                            "fails_in": [j + 1 for j in range(n) if j + 1 not in has],
+                            "reason": "not in every final output, so it is not required"})
+            if common:
+                variants.append((dict(c.check, must=common), "section headings common to all final outputs: " + ", ".join(common)))
+        variants += [(alt, c.basis + f" (whole numbers up to {alt.get('ignore_small_integers')} are not checked)")
+                     for alt in c.alternatives]
+        results: List[Result] = []
+        for check, basis in variants:
+            results = holds(check, c.id)
+            if all(r.status == PASS for r in results):
+                c.check, c.basis = check, (basis or c.basis)
+                break
+        if all(r.status == PASS for r in results):
+            c.basis += (f" (holds in all {n} final outputs)" if len(seen) == n
+                        else f" (seen in final {', '.join(str(i + 1) for i in seen)}; the other final outputs do not break it)")
+            c.final, c.draft, c.source = PASS, "n/a", "feature"
+            kept.append(c)
+            continue
+        results = holds(c.check, c.id)
+        fails = [i for i, r in enumerate(results) if r.status != PASS]
+        inconsistent.append({
+            "id": c.id, "kind": c.kind, "scope": SPECIFIC, "feature": c.basis,
+            "holds_in": [i + 1 for i in range(n) if i not in fails], "fails_in": [i + 1 for i in fails],
+            "reason": f"final {fails[0] + 1}: {_why(results[fails[0]])}"})
+
+    for ft in _count_features(finals):
+        values = ft["values"]
+        if len(set(values)) > 1:
+            inconsistent.append({
+                "id": ft["id"], "kind": "structure", "scope": SPECIFIC, "feature": ft["what"],
+                "holds_in": [], "fails_in": [],
+                "reason": "differs between the final outputs (" + ", ".join(str(v) for v in values) + "), so it is not a rule"})
+            continue
+        check = ft["check"](values[0])
+        if all(r.status == PASS for r in holds(check, ft["id"])) and not any(_same(check, e) for e in existing):
+            kept.append(Candidate(
+                ft["id"], "structure", SPECIFIC, check,
+                f"{ft['what']} is {values[0]} in all {n} final outputs. An exact count is treated as case-specific: "
+                "enable it only if that number is a requirement of the task", enabled=False, final=PASS, draft="n/a"))
+
+    stale = []
+    for e in existing:
+        if e.get("type") in ("llm_rubric", "shell", "python", "action_policy"):
+            continue
+        for i, r in enumerate(holds(e, str(e.get("id", "?")))):
+            if r.status != PASS:
+                stale.append({"id": str(e.get("id", "?")), "reason": f"final {i + 1}: {_why(r)}"})
+                break
+    return {
+        "name": name, "mode": "finals",
+        "learned_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "inputs": str(inputs[0]) if inputs[0] else None,
+        "inputs_all": [str(i) if i else None for i in inputs],
+        "draft": "", "final": str(finals[0]), "finals": [str(f) for f in finals],
+        "edits": [], "candidates": [c.to_dict() for c in kept], "discarded": discarded,
+        "inconsistent": inconsistent, "unconverted_edits": [],
+        "existing_checks_failing_on_final": stale,
+    }
+
+
+def preview_config(doc: Dict[str, Any]) -> Path:
+    """The config `review --yes` would write right now, as a file lint can read. Nothing is activated."""
+    name = check_name(doc["name"])
+    top: Dict[str, Any] = {}
+    old: List[Dict[str, Any]] = []
+    cpath = paths.checks_dir() / f"{name}.yaml"
+    if cpath.is_file():
+        raw = yaml.safe_load(cpath.read_text(encoding="utf-8")) or {}
+        if isinstance(raw, dict):
+            old = [c for c in (raw.pop("checks", None) or []) if isinstance(c, dict)]
+            top = raw
+    enabled = [c for c in doc["candidates"] if c["enabled"]]
+    owned = {c["id"] for c in doc["candidates"]}
+    top["name"] = name
+    top.pop("reference", None)
+    top["checks"] = [c for c in old if str(c.get("id")) not in owned] + [
+        dict({"id": c["id"], "type": c["check"]["type"]}, **{k: v for k, v in c["check"].items() if k not in ("id", "type")})
+        for c in enabled]
+    p = learned_path(name).with_name(f"{name}.preview.yaml")
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(yaml.safe_dump(top, sort_keys=False, allow_unicode=True, width=110), encoding="utf-8")
+    return p
+
+
 def save(doc: Dict[str, Any]) -> Path:
     p = learned_path(doc["name"])
     p.parent.mkdir(parents=True, exist_ok=True)
@@ -563,12 +747,16 @@ def describe_check(check: Dict[str, Any]) -> str:
 
 def candidate_lines(c: Dict[str, Any], indent: str = "  ") -> List[str]:
     src = ("from edit " + ", ".join(c["edits"]) if c.get("edits") else "from an edit") \
-        if c["source"] == "edit" else "from a feature of the final output"
+        if c["source"] == "edit" else "from your judgement of two outputs" if c["source"] == "judgment" \
+        else "from a feature of the final output"
     v = c.get("validation") or {}
     lines = [f"{'[on ]' if c['enabled'] else '[off]'} {c['id']}",
              f"{indent}type: {c['kind']}   scope: {SCOPE_LABEL.get(c['scope'], c['scope'])}   {src}",
              f"{indent}basis: {c['basis']}",
-             f"{indent}validated: final {v.get('final') or '?'}, draft {v.get('draft') or '?'}",
+             (f"{indent}validated: the output you preferred {v.get('final') or 'not graded'}, the other {v.get('draft') or 'not graded'}"
+              if c["source"] == "judgment" else
+              f"{indent}validated: passes every final output" if v.get("draft") == "n/a" and v.get("final") == PASS
+              else f"{indent}validated: final {v.get('final') or '?'}, draft {v.get('draft') or '?'}"),
              f"{indent}check:"]
     lines += [f"{indent}  {ln}" for ln in describe_check(c["check"]).splitlines()]
     return lines
@@ -578,9 +766,16 @@ def render(doc: Dict[str, Any], saved: Optional[Path] = None) -> str:
     cands, edits = doc["candidates"], doc["edits"]
     why = {u["id"]: u["reason"] for u in doc["unconverted_edits"]}
     scope = {c["id"]: c["scope"] for c in cands}
-    out = [f"evalctl learn: {doc['name']}",
-           f"inputs: {doc['inputs'] or '(none)'}", f"draft:  {doc['draft']}", f"final:  {doc['final']}", "",
-           f"Human edits ({len(edits)})"]
+    multi = doc.get("mode") == "finals"
+    if multi:
+        out = [f"evalctl learn: {doc['name']}  (from {len(doc['finals'])} final outputs)"]
+        for i, f in enumerate(doc["finals"]):
+            inp = (doc.get("inputs_all") or [None] * len(doc["finals"]))[i]
+            out.append(f"final {i + 1}: {f}" + (f"   inputs: {inp}" if inp else ""))
+    else:
+        out = [f"evalctl learn: {doc['name']}",
+               f"inputs: {doc['inputs'] or '(none)'}", f"draft:  {doc['draft']}", f"final:  {doc['final']}", "",
+               f"Human edits ({len(edits)})"]
     for e in edits:
         out.append(f"  {e['id']}  {e['where']}  {e['summary']}")
         if e["checks"]:
@@ -588,12 +783,19 @@ def render(doc: Dict[str, Any], saved: Optional[Path] = None) -> str:
                 cid + ("" if scope.get(cid) == GENERAL else " (case-specific)") for cid in e["checks"]))
         if e["id"] in why:
             out.append(f"      {'note' if e['checks'] else 'NOT CONVERTED'}: {why[e['id']]}")
-    if not edits:
+    if not edits and not multi:
         out.append("  (draft and final are identical)")
     on = sum(c["enabled"] for c in cands)
     out += ["", f"Candidate checks ({len(cands)}: {on} enabled, {len(cands) - on} disabled)"]
     for c in cands:
         out += ["  " + ln for ln in candidate_lines(c)] + [""]
+    if doc.get("inconsistent"):
+        out.append(f"Not consistent across the final outputs ({len(doc['inconsistent'])}): case-specific, no check proposed")
+        for x in doc["inconsistent"]:
+            where = f" [holds in final {', '.join(map(str, x['holds_in']))}]" if x.get("holds_in") else ""
+            out.append(f"  - {x['id']}: {x['feature']}{where}")
+            out.append(f"      {x['reason']}")
+        out.append("")
     if doc["discarded"]:
         out.append(f"Discarded ({len(doc['discarded'])})")
         out += [f"  - {d['id']}: {d['reason']}" for d in doc["discarded"]]
@@ -612,6 +814,26 @@ def render(doc: Dict[str, Any], saved: Optional[Path] = None) -> str:
 
 def revalidate(doc: Dict[str, Any], c: Dict[str, Any]) -> Tuple[Optional[str], Optional[str]]:
     """Re-run one candidate on the example it was learned from, if that still exists."""
+    if c.get("example"):  # a rubric made from a pairwise judgement: its own pair of outputs
+        good, bad = Path(c["example"]["good"]), Path(c["example"]["bad"])
+        if not good.is_dir():
+            return None, None
+        rg = run_check(c["check"], good, None, c["id"])
+        rb = run_check(c["check"], bad, None, c["id"]) if bad.is_dir() else None
+        c["validation"] = {"final": rg.status, "draft": rb.status if rb else ""}
+        return rg.status, (None if rg.status == PASS else _why(rg))
+    if doc.get("mode") == "finals":
+        finals = [Path(f) for f in doc["finals"]]
+        ins = [Path(i) if i else None for i in (doc.get("inputs_all") or [None] * len(finals))]
+        if not all(f.is_dir() for f in finals) or not all(i is None or i.is_dir() for i in ins):
+            return None, None
+        for f, i in zip(finals, ins):
+            r = run_check(c["check"], f, i, c["id"])
+            if r.status != PASS:
+                c["validation"] = {"final": r.status, "draft": "n/a"}
+                return r.status, f"{f}: {_why(r)}"
+        c["validation"] = {"final": PASS, "draft": "n/a"}
+        return PASS, None
     final, draft = Path(doc["final"]), Path(doc["draft"])
     inputs = Path(doc["inputs"]) if doc.get("inputs") else None
     if not final.is_dir() or (inputs is not None and not inputs.is_dir()):
@@ -648,10 +870,13 @@ def write_config(doc: Dict[str, Any]) -> Tuple[Path, int, int, Optional[Path]]:
     if not enabled and not kept:
         raise ConfigError("no check is enabled, so there is nothing to write")
     top.setdefault("name", name)
+    # A known-good output for `evalctl lint`: every check must pass on it.
+    top["reference"] = {"final": doc["final"], **({"inputs": doc["inputs"]} if doc.get("inputs") else {})}
 
     dump = lambda v: yaml.safe_dump(v, sort_keys=False, allow_unicode=True, width=110)
     parts = [f"# Written by `evalctl review {name}` on {datetime.now():%Y-%m-%d %H:%M}.",
-             f"# Learned from: draft {doc['draft']} -> final {doc['final']}",
+             (f"# Learned from {len(doc['finals'])} final outputs: {', '.join(doc['finals'])}" if doc.get("mode") == "finals"
+              else f"# Learned from: draft {doc['draft']} -> final {doc['final']}"),
              dump(top).rstrip(), "", "checks:"]
     block = lambda c: ["  " + ln for ln in dump([c]).rstrip().splitlines()]
     for c in kept:

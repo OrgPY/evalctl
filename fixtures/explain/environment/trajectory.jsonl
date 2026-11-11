@@ -1,0 +1,8 @@
+{"type": "thread.started", "thread_id": "t-fixture"}
+{"type": "turn.started"}
+{"type": "item.completed", "item": {"id": "item_0", "type": "agent_message", "text": "I'll fetch the listing page first."}}
+{"type": "item.completed", "item": {"id": "item_1", "type": "command_execution", "command": "/bin/zsh -lc \"curl -sS https://forum.homelab.example/latest -o page.html\"", "aggregated_output": "curl: (6) Could not resolve host: forum.homelab.example\n", "exit_code": 6, "status": "failed"}}
+{"type": "item.completed", "item": {"id": "item_2", "type": "command_execution", "command": "/bin/zsh -lc \"curl -sS --retry 2 https://forum.homelab.example/latest -o page.html\"", "aggregated_output": "curl: (6) Could not resolve host: forum.homelab.example\n", "exit_code": 6, "status": "failed"}}
+{"type": "item.completed", "item": {"id": "item_3", "type": "command_execution", "command": "/bin/zsh -lc \"touch posts.jsonl\"", "aggregated_output": "", "exit_code": 0, "status": "completed"}}
+{"type": "item.completed", "item": {"id": "item_4", "type": "agent_message", "text": "The site could not be reached from this environment, so posts.jsonl is empty."}}
+{"type": "turn.completed", "usage": {"input_tokens": 1, "output_tokens": 1}}

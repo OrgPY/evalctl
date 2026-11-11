@@ -1,0 +1,7 @@
+{
+  "category": "tool_error",
+  "steps": [
+    3
+  ],
+  "why": "The extraction script crashes after 5 posts; the agent sees the traceback and delivers the partial file anyway."
+}

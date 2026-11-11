@@ -7,96 +7,36 @@ import time
 from pathlib import Path
 from typing import List, Optional
 
-from . import __version__, config as cfg, receipt, report, store
-from .checks import ERROR, FAIL, PASS, REGISTRY, SKIPPED, SOFT_TYPES, Context, Result
+from . import __version__, config as cfg, engine, loop as lp, receipt, store
+from .checks import ERROR
 from .config import ConfigError
-from .judge import detect_worker
 
 EXIT_PASS, EXIT_FAIL, EXIT_CONFIG = 0, 1, 2
 
 
-def run_checks(conf: cfg.Config, workdir: Path, worker: Optional[str],
-               inputs: Optional[Path] = None) -> List[Result]:
-    """Hard checks first; model-graded checks only when every hard check passed."""
-    ctx = Context(workdir=workdir, config=conf, worker=worker, inputs=inputs)
-    results: dict = {}
-    hard = [c for c in conf.checks if c.type not in SOFT_TYPES]
-    soft = [c for c in conf.checks if c.type in SOFT_TYPES]
-    for spec in hard:
-        try:
-            results[spec.id] = REGISTRY[spec.type].run(spec, ctx)
-        except ConfigError as e:
-            results[spec.id] = Result(spec.id, spec.type, ERROR, str(e), [str(e)])
-    hard_ok = all(results[s.id].status == PASS for s in hard)
-    for spec in soft:
-        if not hard_ok:
-            results[spec.id] = Result(spec.id, spec.type, SKIPPED,
-                                      "not run: runs only after all other checks pass")
-            continue
-        try:
-            results[spec.id] = REGISTRY[spec.type].run(spec, ctx)
-        except ConfigError as e:
-            results[spec.id] = Result(spec.id, spec.type, ERROR, str(e), [str(e)])
-    return [results[c.id] for c in conf.checks]
-
-
-def _config_error(args: argparse.Namespace, message: str, workdir: Optional[Path] = None,
-                  name: str = "?") -> int:
+def _config_error(args: argparse.Namespace, message: str) -> int:
     if getattr(args, "json", False):
         print(json.dumps({"status": "error", "passed": False, "error": message,
                           "text": f"evalctl: configuration error\n{message}"}, ensure_ascii=False, indent=2))
     else:
         print(f"evalctl: configuration error\n{message}", file=sys.stderr)
-    if workdir is not None and args.cmd == "check":
-        try:
-            store.record(workdir, name, None, None, None, None, "error", args.source, None, 0.0,
-                         [{"id": "config", "type": "config", "status": "error", "summary": message}])
-        except Exception:
-            pass
     return EXIT_CONFIG
 
 
 def cmd_check(args: argparse.Namespace) -> int:
-    started = time.time()
     try:
-        workdir, cpath, pointer = cfg.select(args.dir, args.config)
+        trajectories = engine.env_trajectories(args.trajectory)
     except ConfigError as e:
         return _config_error(args, str(e))
-    try:
-        conf = cfg.load(cpath, workdir)
-        inputs = cfg.resolve_inputs(args.inputs, pointer)
-    except ConfigError as e:
-        return _config_error(args, str(e), workdir, cpath.stem)
-
-    worker = detect_worker(args.worker, conf.worker_family)
-    digest = receipt.digest(receipt.hash_artifacts(workdir, conf.artifacts))
-    task_id, round_no = store.plan_round(workdir, conf.name, conf.sha256, digest)
-
-    results = run_checks(conf, workdir, worker, inputs)
-    status = report.overall(results)
-    receipt_file = None
-    if status == PASS:
-        try:
-            receipt_file = str(receipt.write(workdir, conf, results, round_no))
-        except ConfigError as e:
-            results.append(Result("receipt", "receipt", ERROR, str(e), [str(e)]))
-            status = ERROR
-    if status == FAIL:
-        receipt.invalidate(workdir)
-
-    is_error = status == ERROR
-    store.record(workdir, conf.name, conf.sha256, digest,
-                 None if is_error else task_id, None if is_error else round_no,
-                 status, args.source, worker, time.time() - started, [r.to_dict() for r in results])
-
-    shown_round = None if is_error else round_no
-    text = report.render_text(conf, workdir, results, status, shown_round, receipt_file)
+    out = engine.check(args.dir, args.config, inputs_arg=args.inputs, worker_arg=args.worker,
+                       profile_arg=args.profile, source=args.source, trajectories=trajectories)
     if args.json:
-        print(json.dumps(report.to_json(conf, workdir, results, status, shown_round, receipt_file, text),
-                         ensure_ascii=False, indent=2))
+        print(json.dumps(out.data, ensure_ascii=False, indent=2))
+    elif out.status == ERROR and not out.results:
+        print(out.text, file=sys.stderr)
     else:
-        print(text)
-    return {PASS: EXIT_PASS, FAIL: EXIT_FAIL, ERROR: EXIT_CONFIG}[status]
+        print(out.text)
+    return out.exit_code
 
 
 def cmd_verify(args: argparse.Namespace) -> int:
@@ -117,10 +57,11 @@ def cmd_verify(args: argparse.Namespace) -> int:
             if cpath is not None and not cpath.is_file():
                 raise ConfigError(f"the receipt names check config {cpath}, which no longer exists")
         conf = cfg.load(cpath, workdir) if cpath else None
+        loop = lp.from_pointer(pointer, args.profile)
     except ConfigError as e:
         return _config_error(args, str(e))
 
-    valid, reasons, rec = receipt.verify(workdir, conf)
+    valid, reasons, rec = receipt.verify(workdir, conf, loop)
     if args.json:
         print(json.dumps({"valid": valid, "dir": str(workdir), "reasons": reasons, "receipt": rec},
                          ensure_ascii=False, indent=2))
@@ -135,12 +76,18 @@ def cmd_verify(args: argparse.Namespace) -> int:
 
 
 def cmd_stats(args: argparse.Namespace) -> int:
+    from . import pairwise
     data = store.stats(args.config)
+    judged = pairwise.summary(args.config)
+    for name, j in judged.items():
+        if name in data["configs"]:
+            data["configs"][name]["judgements"] = j
+    data["judgements"] = judged
     if args.json:
         print(json.dumps(data, ensure_ascii=False, indent=2))
         return 0
     if not data["configs"]:
-        print("No runs recorded yet.")
+        print("No runs recorded yet." + ("\n\n" + pairwise.render_summary(judged) if judged else ""))
         return 0
     for name, s in sorted(data["configs"].items()):
         print(f"{name}")
@@ -157,6 +104,19 @@ def cmd_stats(args: argparse.Namespace) -> int:
             print("  most often failing checks:")
             for c in s["top_failing_checks"]:
                 print(f"    {c['failed_rounds']:>3}x  {c['id']}")
+        if s.get("tasks_needing_human_judgement"):
+            print(f"  tasks whose repeat runs disagreed (need your judgement): {s['tasks_needing_human_judgement']}")
+        if s.get("rubric_consistency"):
+            print("  rubric items, agreement between repeated gradings:")
+            for item, c in s["rubric_consistency"].items():
+                print(f"    {c['consistency']:>4.0%}  {item}  ({c['runs']} run(s)"
+                      + (f", unstable in {c['unstable_runs']}" if c["unstable_runs"] else "") + ")")
+        jd = s.get("judgements")
+        if jd and jd["graded"]:
+            print(f"  llm_rubric vs your pairwise judgements: agreement {jd['agreement_rate']:.0%}  "
+                  f"({jd['agree']} agree, {jd['disagree']} disagree, {jd['tie']} tie, of {jd['graded']} pairs)")
+        elif jd:
+            print(f"  pairwise judgements: {jd['judgements']} (none graded by an llm_rubric check)")
         fb = s.get("feedback")
         if fb:
             print(f"  your verdicts: {fb['verdicts']}   agreed with the checks: {fb['agree']}   "
@@ -179,12 +139,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     c.add_argument("--worker", help="model family that produced the output (anthropic, openai, deepseek, ...)")
     c.add_argument("--inputs", help="directory with the task's input files, for checks that compare "
                                     "the output with them (default: $EVALCTL_INPUTS, else `inputs:` in .evalctl.yaml)")
+    c.add_argument("--profile", help="loop profile from .evalctl.yaml (default: $EVALCTL_PROFILE, else its `profile:`)")
+    c.add_argument("--trajectory", action="append", metavar="FILE",
+                   help="the agent's tool-call log, for action_policy checks (repeatable; default: $EVALCTL_TRAJECTORY)")
     c.add_argument("--source", default="cli", choices=["cli", "hook"], help=argparse.SUPPRESS)
     c.set_defaults(fn=cmd_check)
 
     v = sub.add_parser("verify", help="is the receipt valid for the files and config as they are now?")
     v.add_argument("--dir")
     v.add_argument("--config")
+    v.add_argument("--profile", help="verify against this loop profile (default: $EVALCTL_PROFILE, else `profile:`)")
     v.add_argument("--json", action="store_true")
     v.set_defaults(fn=cmd_verify)
 
@@ -193,8 +157,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     s.add_argument("--json", action="store_true")
     s.set_defaults(fn=cmd_stats)
 
-    from . import teach
+    from . import commands, teach
     teach.add_parsers(sub)
+    commands.add_parsers(sub)
 
     args = ap.parse_args(argv)
     try:

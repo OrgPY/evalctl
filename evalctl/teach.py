@@ -33,23 +33,98 @@ def _dir(value: Optional[str], flag: str, required: bool = True) -> Optional[Pat
 
 # ---------------------------------------------------------------- learn
 
+def _auto_lint(name_or_path: str, final: Optional[Path], inputs: Optional[Path], what: str) -> Optional[Dict[str, Any]]:
+    """Lint after learn / review. Never blocks them: a config that cannot be linted is reported, not refused."""
+    from . import lint
+    try:
+        conf = lint.load_for_lint(name_or_path, final if final and final.is_dir() else None)
+        res = lint.run_or_static(conf, final=final if final and final.is_dir() else None,
+                                 inputs=inputs if inputs and inputs.is_dir() else None)
+    except ConfigError as e:
+        print(f"\nlint of {what} could not run: {e}")
+        return None
+    return res
+
+
+def draft_from_git(final: Path, rev: str, name: str) -> Path:
+    """The directory `final` as it was at git revision `rev`, extracted next to the learned candidates."""
+    def git(*argv: str, binary: bool = False, at: Optional[str] = None) -> Any:
+        p = subprocess.run(["git", "-C", at or str(final), *argv], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if p.returncode != 0:
+            raise ConfigError(f"--draft-rev {rev}: `git {' '.join(argv)}` failed in {final}: "
+                              + p.stderr.decode("utf-8", errors="replace").strip())
+        return p.stdout if binary else p.stdout.decode("utf-8", errors="replace").strip()
+
+    if not shutil.which("git"):
+        raise ConfigError("--draft-rev needs git on PATH")
+    prefix = git("rev-parse", "--show-prefix").rstrip("/")
+    commit = git("rev-parse", "--verify", f"{rev}^{{commit}}")
+    tree = f"{commit}:{prefix}" if prefix else commit
+    git("rev-parse", "--verify", tree + ("" if prefix else "^{tree}"))  # the directory must exist in that revision
+    dest = lrn.learned_path(name).with_name(f"{name}.draft-{commit[:10]}")
+    shutil.rmtree(dest, ignore_errors=True)
+    dest.mkdir(parents=True)
+    tar = subprocess.run(["tar", "-x", "-C", str(dest)], input=git("archive", "--format=tar", tree, binary=True, at=git("rev-parse", "--show-toplevel")),
+                         stderr=subprocess.PIPE)
+    if tar.returncode != 0:
+        raise ConfigError(f"--draft-rev {rev}: could not unpack the revision: {tar.stderr.decode(errors='replace').strip()}")
+    return dest
+
+
 def cmd_learn(args: argparse.Namespace) -> int:
     name = lrn.check_name(args.name)
-    inputs = _dir(args.inputs, "--inputs", required=False)
-    draft, final = _dir(args.draft, "--draft"), _dir(args.final, "--final")
-    if draft == final:
-        raise ConfigError("--draft and --final are the same directory; learn needs the output before "
-                          "and after the human edits")
-    if not lrn.list_files(final):
-        raise ConfigError(f"--final: {final} has no files")
-    doc = lrn.learn(inputs, draft, final, name)
+    inputs_all = [_dir(i, "--inputs") for i in (args.inputs or [])]
+    if args.finals:
+        if args.draft or args.final or args.draft_rev:
+            raise ConfigError("--finals is its own mode: use it without --draft, --draft-rev and --final")
+        finals = [_dir(f, "--finals") for f in args.finals]
+        if len(finals) < 2 or len(set(finals)) != len(finals):
+            raise ConfigError("--finals needs at least two different directories (corrected outputs of the same workflow)")
+        for f in finals:
+            if not lrn.list_files(f):
+                raise ConfigError(f"--finals: {f} has no files")
+        if len(inputs_all) not in (0, 1, len(finals)):
+            raise ConfigError(f"--inputs: give one directory for all finals, or one per final ({len(finals)}), in the same order")
+        per_final = inputs_all if len(inputs_all) == len(finals) else [inputs_all[0] if inputs_all else None] * len(finals)
+        doc = lrn.learn_finals(finals, per_final, name)
+        final, inputs = finals[0], per_final[0]
+    else:
+        if len(inputs_all) > 1:
+            raise ConfigError("--inputs takes one directory unless --finals is used")
+        inputs = inputs_all[0] if inputs_all else None
+        final = _dir(args.final, "--final")
+        if bool(args.draft) == bool(args.draft_rev):
+            raise ConfigError("give the agent's draft as either --draft DIR or --draft-rev REV (a git revision of --final)")
+        draft = _dir(args.draft, "--draft") if args.draft else draft_from_git(final, args.draft_rev, name)
+        if draft == final:
+            raise ConfigError("--draft and --final are the same directory; learn needs the output before "
+                              "and after the human edits")
+        if not lrn.list_files(final):
+            raise ConfigError(f"--final: {final} has no files")
+        doc = lrn.learn(inputs, draft, final, name)
+        if args.draft_rev:
+            doc["draft_rev"] = args.draft_rev
+    try:  # rubric candidates made by `evalctl judge` belong to the name, not to one learn run: keep them
+        old = lrn.load(name)
+        have = {c["id"] for c in doc["candidates"]}
+        doc["candidates"] += [c for c in old["candidates"] if c.get("source") == "judgment" and c["id"] not in have]
+    except ConfigError:
+        pass
     saved = lrn.save(doc)
+    lint_res = None
+    if not args.no_lint and any(c["enabled"] for c in doc["candidates"]):
+        lint_res = _auto_lint(str(lrn.preview_config(doc)), final, inputs, "the enabled candidates")
     if args.json:
-        print(json.dumps(dict(doc, saved_to=str(saved)), ensure_ascii=False, indent=2))
+        print(json.dumps(dict(doc, saved_to=str(saved), lint=lint_res), ensure_ascii=False, indent=2))
     else:
         if inputs is None:
             print("note: no --inputs given, so no input/output relation checks were looked for.\n")
+        if args.draft_rev:
+            print(f"note: draft taken from git revision {args.draft_rev} -> {doc['draft']}\n")
         print(lrn.render(doc, saved))
+        if lint_res:
+            from . import lint
+            print("\nLint of the enabled candidates (as the config would be after `review --yes`):\n" + lint.render(lint_res))
     return 0
 
 
@@ -170,6 +245,12 @@ def cmd_review(args: argparse.Namespace) -> int:
     print(f"To gate a directory with it, put `config: {doc['name']}` in its .evalctl.yaml"
           + (" (add `inputs: <dir>` for the checks that read the task inputs)"
              if any(getattr(REGISTRY.get(c["check"].get("type")), "needs_inputs", False) for c in on) else "") + ".")
+    if not args.no_lint:
+        from . import lint
+        final = Path(doc["final"]) if doc.get("final") else None
+        res = _auto_lint(str(path), final, Path(doc["inputs"]) if doc.get("inputs") else None, str(path))
+        if res:
+            print("\n" + lint.render(res))
     return 0
 
 
@@ -186,8 +267,8 @@ def cmd_feedback(args: argparse.Namespace) -> int:
         status, results = prior
         ran_now = False
     else:  # nobody has checked these exact files yet: check them now, without a receipt or a run record
-        from .cli import run_checks
-        res = run_checks(conf, workdir, detect_worker(None, conf.worker_family), inputs)
+        from .engine import run_checks
+        res, _ = run_checks(conf, workdir, detect_worker(None, conf.worker_family), inputs)
         status, results, ran_now = report.overall(res), [r.to_dict() for r in res], True
     failed = [r for r in results if r["status"] == FAIL]
     store.record_feedback(workdir, conf.name, digest, args.verdict, status, [r["id"] for r in failed], args.note)
@@ -245,10 +326,15 @@ def cmd_feedback(args: argparse.Namespace) -> int:
 
 def add_parsers(sub: Any) -> None:
     l = sub.add_parser("learn", help="propose checks from one example: the inputs, the agent's draft, your corrected final")
-    l.add_argument("--inputs", help="directory with the files the task started from")
-    l.add_argument("--draft", required=True, help="the output as the agent produced it")
-    l.add_argument("--final", required=True, help="the same output after you corrected it")
+    l.add_argument("--inputs", nargs="+", metavar="DIR", help="directory with the files the task started from "
+                   "(with --finals: one for all, or one per final in the same order)")
+    l.add_argument("--draft", help="the output as the agent produced it")
+    l.add_argument("--draft-rev", metavar="REV", help="take the draft from git: the --final directory as it was at this revision")
+    l.add_argument("--final", help="the same output after you corrected it")
+    l.add_argument("--finals", nargs="+", metavar="DIR", help="several corrected outputs of the same workflow, no drafts: "
+                   "what they all share becomes a candidate rule, what differs is case-specific")
     l.add_argument("--name", required=True, help="name of the check config to build")
+    l.add_argument("--no-lint", action="store_true", help="do not lint the enabled candidates")
     l.add_argument("--json", action="store_true")
     l.set_defaults(fn=cmd_learn)
 
@@ -257,6 +343,7 @@ def add_parsers(sub: Any) -> None:
     r.add_argument("--enable", action="append", metavar="ID", help="enable this candidate (repeatable)")
     r.add_argument("--disable", action="append", metavar="ID", help="disable this candidate (repeatable)")
     r.add_argument("--yes", action="store_true", help="do not prompt: write the config with the current choices")
+    r.add_argument("--no-lint", action="store_true", help="do not lint the written config")
     r.set_defaults(fn=cmd_review)
 
     f = sub.add_parser("feedback", help="record your own verdict on an output and compare it with the checks")

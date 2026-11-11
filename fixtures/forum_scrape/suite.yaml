@@ -1,0 +1,13 @@
+# A one-task suite for `evalctl bench` (and the task used to try `evalctl run`):
+#   evalctl bench fixtures/forum_scrape/suite.yaml --agent claude
+#   cd <empty dir> && cp ~/evalctl/fixtures/forum_scrape/task/page.html . && echo "config: forum_scrape" > .evalctl.yaml
+#   evalctl run --agent claude "<the prompt below>"
+# The prompt names the fields loosely, the way a person would. The check config is stricter.
+name: forum_scrape
+config: forum_scrape
+tasks:
+  - id: latest_page
+    files: task
+    prompt: >-
+      page.html is a saved listing page from forum.homelab.example. Extract every post on it
+      into posts.jsonl, one JSON object per line, with the post's title, link, author, time and text.

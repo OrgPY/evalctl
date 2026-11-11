@@ -1,0 +1,7 @@
+{
+  "category": "reasoning_error",
+  "steps": [
+    3
+  ],
+  "why": "The agent reads every row, then adds the Meals rows up wrongly (38.50 + 22.75 + 96.30 is 157.55, not 147.55)."
+}

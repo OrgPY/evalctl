@@ -51,6 +51,9 @@ class Config:
     max_rounds: int = 3
     judge: Any = None
     worker_family: Optional[str] = None
+    description: Optional[str] = None
+    task: Optional[str] = None                 # what the workflow is asked to deliver (read by lint)
+    reference: Dict[str, Any] = field(default_factory=dict)  # {final: DIR, inputs: DIR}: a known-good output
     raw: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -78,6 +81,18 @@ def read_pointer(pointer: Path) -> str:
     if not isinstance(data, dict) or not isinstance(data.get("config"), str) or not data["config"].strip():
         raise ConfigError(f"{pointer}: expected a single line like `config: <name>`")
     return data["config"].strip()
+
+
+def pointer_data(pointer: Path) -> Dict[str, Any]:
+    """The whole .evalctl.yaml: `config`, optional `inputs`, `profile`, `loop`, `profiles`."""
+    data = _load_yaml(pointer)
+    if not isinstance(data, dict):
+        raise ConfigError(f"{pointer}: expected a mapping with at least `config: <name>`")
+    unknown = set(data) - {"config", "inputs", "profile", "loop", "profiles"}
+    if unknown:
+        raise ConfigError(f"{pointer}: unknown key(s): {', '.join(sorted(unknown))} "
+                          "(allowed: config, inputs, profile, loop, profiles)")
+    return data
 
 
 def resolve_inputs(inputs_arg: Optional[str], pointer: Optional[Path]) -> Optional[Path]:
@@ -163,7 +178,8 @@ def load(config_path: Path, workdir: Path) -> Config:
     data = _load_yaml(config_path)
     if not isinstance(data, dict):
         raise ConfigError(f"{config_path}: top level must be a mapping")
-    known = {"name", "description", "artifacts", "max_rounds", "judge", "worker_family", "checks"}
+    known = {"name", "description", "task", "reference", "artifacts", "max_rounds", "judge",
+             "worker_family", "checks"}
     unknown = set(data) - known
     if unknown:
         raise ConfigError(f"{config_path}: unknown top-level key(s): {', '.join(sorted(unknown))}")
@@ -182,6 +198,14 @@ def load(config_path: Path, workdir: Path) -> Config:
     max_rounds = data.get("max_rounds", 3)
     if not isinstance(max_rounds, int) or max_rounds < 1:
         raise ConfigError(f"{config_path}: `max_rounds` must be a positive integer")
+
+    reference = data.get("reference") or {}
+    if not isinstance(reference, dict) or set(reference) - {"final", "inputs"}:
+        raise ConfigError(f"{config_path}: `reference` is a mapping with `final` and optionally `inputs` "
+                          "(directories of a known-good output)")
+    for key in ("description", "task"):
+        if data.get(key) is not None and not isinstance(data[key], str):
+            raise ConfigError(f"{config_path}: `{key}` must be text")
 
     checks: List[CheckSpec] = []
     seen = set()
@@ -225,5 +249,8 @@ def load(config_path: Path, workdir: Path) -> Config:
         max_rounds=max_rounds,
         judge=data.get("judge"),
         worker_family=data.get("worker_family"),
+        description=data.get("description"),
+        task=data.get("task"),
+        reference={k: str(v) for k, v in reference.items()},
         raw=data,
     )

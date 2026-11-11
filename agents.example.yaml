@@ -1,0 +1,45 @@
+# Agent adapters for `evalctl run` and `evalctl bench`.
+#
+# start    command for the first call          placeholders: {prompt} {dir}
+# resume   command that continues the session  placeholders: {prompt} {dir} {session_id}
+#          Leave it out for an agent that cannot continue a session: evalctl then starts a new
+#          call and puts the location of the previous output and the failure list in the prompt.
+# output   json | jsonl | text    how stdout is read to find the session id
+# session_id_field   field holding the session id (dotted path; for jsonl the last line that has it)
+# trajectory         claude | codex | none   format of stdout as a tool-call log
+#                    (used by `evalctl explain` and by action_policy checks)
+# family   model family doing the work; the grader for llm_rubric must be from another family
+# timeout  seconds per call
+# stdin    true: send the prompt on stdin instead of {prompt}
+# env      extra environment variables for the agent
+#
+# A command is a string (split like a shell would, without running a shell) or a list.
+agents:
+  claude:
+    family: anthropic
+    # acceptEdits lets Claude write files but not run arbitrary shell commands or use the
+    # network. Widen it for workflows that need more, e.g. add:  --allowedTools "Bash,WebFetch"
+    start: claude -p {prompt} --output-format stream-json --verbose --permission-mode acceptEdits
+    resume: claude -p {prompt} --resume {session_id} --output-format stream-json --verbose --permission-mode acceptEdits
+    output: jsonl
+    session_id_field: session_id
+    trajectory: claude
+    timeout: 1800
+
+  codex:
+    family: openai
+    start: codex exec --json --skip-git-repo-check -s workspace-write {prompt}
+    # `codex exec resume` has no -s flag; the sandbox is set with -c.
+    resume: codex exec resume --json --skip-git-repo-check -c sandbox_mode="workspace-write" {session_id} {prompt}
+    output: jsonl
+    session_id_field: thread_id
+    trajectory: codex
+    timeout: 1800
+
+  # An agent without session support (your own harness):
+  # deepseek_scraper:
+  #   family: deepseek
+  #   start: python3 ~/harness/run.py --task {prompt} --out {dir}
+  #   output: text
+  #   trajectory: none
+  #   timeout: 900

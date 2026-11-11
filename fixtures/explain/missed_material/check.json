@@ -1,0 +1,27 @@
+{
+  "status": "fail",
+  "passed": false,
+  "round": 1,
+  "max_rounds": 3,
+  "checks": [
+    {
+      "id": "report_md_numbers_from_inputs",
+      "type": "numbers_in_inputs",
+      "summary": "5 problem(s)",
+      "failures": [
+        "report.md:9: 820.00 is not in the inputs and is not a sum or count of input rows",
+        "report.md:10: 150.00 is not in the inputs and is not a sum or count of input rows",
+        "report.md:11: 300.00 is not in the inputs and is not a sum or count of input rows",
+        "report.md:12: 100.00 is not in the inputs and is not a sum or count of input rows",
+        "report.md:13: 1,370.00 is not in the inputs and is not a sum or count of input rows"
+      ],
+      "status": "fail"
+    },
+    {
+      "id": "report_md_exists",
+      "type": "file",
+      "status": "pass",
+      "summary": "ok"
+    }
+  ]
+}

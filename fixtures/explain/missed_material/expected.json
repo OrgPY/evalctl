@@ -1,0 +1,8 @@
+{
+  "category": "missed_material",
+  "steps": [
+    4,
+    5
+  ],
+  "why": "The agent reads the brief but never opens expenses.csv, and invents plausible figures."
+}

@@ -1,0 +1,8 @@
+{
+  "category": "format_mismatch",
+  "steps": [
+    2,
+    3
+  ],
+  "why": "Every post is extracted correctly, but with the field names and date format of the page, not the required ones."
+}

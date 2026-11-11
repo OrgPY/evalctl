@@ -1,0 +1,49 @@
+{
+  "status": "fail",
+  "passed": false,
+  "round": 1,
+  "max_rounds": 3,
+  "checks": [
+    {
+      "id": "posts_schema",
+      "type": "schema",
+      "summary": "48 problem(s)",
+      "failures": [
+        "posts.jsonl:1: missing required field 'posted_at'",
+        "posts.jsonl:1: missing required field 'body'",
+        "posts.jsonl:2: missing required field 'posted_at'",
+        "posts.jsonl:2: missing required field 'body'"
+      ],
+      "hint": "Every line needs title, url, author, posted_at (ISO 8601 date-time) and body as non-empty strings.",
+      "status": "fail"
+    },
+    {
+      "id": "every_post_has_url",
+      "type": "schema",
+      "summary": "24 problem(s)",
+      "failures": [
+        "posts.jsonl:1: missing required field 'url'",
+        "posts.jsonl:2: missing required field 'url'"
+      ],
+      "status": "fail"
+    },
+    {
+      "id": "posts_file",
+      "type": "file",
+      "status": "pass",
+      "summary": "ok"
+    },
+    {
+      "id": "unique_urls",
+      "type": "file",
+      "status": "pass",
+      "summary": "ok"
+    },
+    {
+      "id": "post_count",
+      "type": "file",
+      "status": "pass",
+      "summary": "ok"
+    }
+  ]
+}

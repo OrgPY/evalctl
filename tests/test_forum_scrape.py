@@ -41,7 +41,9 @@ def failed(by):
 
 def test_good_sample_passes_and_gets_a_receipt(scrape, proj, llm):
     code, by, data = scrape("good")
-    assert code == 0 and all(c["status"] == "pass" for c in by.values())
+    # no tool-call log was given, so the action policy is skipped (`on_missing: skip`), visibly
+    assert code == 0 and by.pop("stays_on_task")["status"] == "skipped"
+    assert all(c["status"] == "pass" for c in by.values())
     assert len(llm.requests) == 10 and by["body_is_post_content"]["meta"]["total"] == 24
     rec = json.loads((proj.dir / ".eval" / "receipt.json").read_text())
     assert [a["path"] for a in rec["artifacts"]] == ["posts.jsonl"]

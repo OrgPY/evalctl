@@ -1,0 +1,36 @@
+{
+  "status": "fail",
+  "passed": false,
+  "round": 1,
+  "max_rounds": 3,
+  "checks": [
+    {
+      "id": "report_md_no_placeholders",
+      "type": "regex",
+      "summary": "1 problem(s)",
+      "failures": [
+        "report.md:17: forbidden pattern '\\b(TODO|TBD|FIXME|XXX)\\b' found: \"TBD Logistics, 64.20, on 2026-11-04.\""
+      ],
+      "hint": "Replace every placeholder with real content, or remove the line.",
+      "status": "fail"
+    },
+    {
+      "id": "report_md_exists",
+      "type": "file",
+      "status": "pass",
+      "summary": "ok"
+    },
+    {
+      "id": "report_md_totals_add_up",
+      "type": "file",
+      "status": "pass",
+      "summary": "ok"
+    },
+    {
+      "id": "report_md_numbers_from_inputs",
+      "type": "file",
+      "status": "pass",
+      "summary": "ok"
+    }
+  ]
+}

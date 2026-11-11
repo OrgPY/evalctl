@@ -44,6 +44,10 @@ class Project:
             (self.dir / ".evalctl.yaml").write_text(f"config: {name}\n", encoding="utf-8")
         return path
 
+    def pointer(self, name="t", **more):
+        """Write .evalctl.yaml with loop / profile / profiles settings."""
+        (self.dir / ".evalctl.yaml").write_text(yaml.safe_dump({"config": name, **more}, sort_keys=False), encoding="utf-8")
+
     def write(self, rel, content):
         p = self.dir / rel
         p.parent.mkdir(parents=True, exist_ok=True)
@@ -91,6 +95,9 @@ class FakeLLM:
         self.requests = []
         self.decide = lambda item: True
         self.raw_answer = None  # set to a string to answer with exactly that text
+        self.verdict = None     # (item_text, criterion_id, nth grading request) -> bool; wins over `decide`
+        self.reply = None       # prompt -> answer text, for requests that are not gradings (lint, explain)
+        self.gradings = 0
         outer = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -101,12 +108,17 @@ class FakeLLM:
                 body = json.loads(self.rfile.read(int(self.headers["content-length"])))
                 outer.requests.append({"path": self.path, "headers": {k.lower(): v for k, v in self.headers.items()}, "body": body})
                 prompt = body["messages"][-1]["content"]
-                ids = re.findall(r'^- id "([^"]+)":', prompt, re.M)
-                item = prompt.split("<item>", 1)[1].split("</item>", 1)[0]
-                ok = outer.decide(item)
-                answer = outer.raw_answer or json.dumps({"verdicts": [
-                    {"id": i, "pass": ok, "reason": "looks fine" if ok else "this is navigation text"}
-                    for i in ids]})
+                if "<item>" not in prompt:
+                    answer = outer.raw_answer or (outer.reply(prompt) if outer.reply else "{}")
+                else:
+                    ids = re.findall(r'^- id "([^"]+)":', prompt, re.M)
+                    item = prompt.split("<item>", 1)[1].split("</item>", 1)[0]
+                    outer.gradings += 1
+                    oks = {i: (outer.verdict(item, i, outer.gradings) if outer.verdict else outer.decide(item))
+                           for i in ids}
+                    answer = outer.raw_answer or json.dumps({"verdicts": [
+                        {"id": i, "pass": oks[i], "reason": "looks fine" if oks[i] else "this is navigation text"}
+                        for i in ids]})
                 if self.path.endswith("/v1/messages"):
                     payload = {"content": [{"type": "text", "text": answer}], "stop_reason": "end_turn"}
                 elif self.path.endswith("/chat/completions"):
@@ -136,3 +148,42 @@ def llm():
     s = FakeLLM()
     yield s
     s.close()
+
+
+@pytest.fixture
+def grader(llm, home, monkeypatch):
+    """The fake model as the global grader (~/.evalctl/judge.yaml), usable by rubric checks, lint and explain."""
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "k")
+    (home / "judge.yaml").write_text(f"judges:\n  - {{provider: deepseek, model: m, base_url: '{llm.url}'}}\n")
+    return llm
+
+
+class FakeAgent:
+    """Registers tests/fake_agent.py as agent `fake` in the test home's agents.yaml."""
+
+    def __init__(self, home: Path, tmp_path: Path):
+        self.home, self.plan = home, tmp_path / "plan.json"
+
+    def script(self, *runs, resume=True, fmt="claude", timeout=60):
+        """Each run is a list of calls; see fake_agent.py."""
+        import sys
+        self.plan.write_text(json.dumps({"runs": [list(r) for r in runs]}))
+        for extra in (".state", ".calls"):
+            Path(str(self.plan) + extra).unlink(missing_ok=True)
+        base = [sys.executable, str(Path(__file__).with_name("fake_agent.py")), "--plan", str(self.plan), "--format", fmt]
+        agent = {"family": "anthropic", "start": base + ["{prompt}"], "timeout": timeout,
+                 "output": "text" if fmt == "text" else "jsonl",
+                 "trajectory": "none" if fmt == "text" else fmt}
+        if resume and fmt != "text":
+            agent["resume"] = base + ["--resume", "{session_id}", "{prompt}"]
+            agent["session_id_field"] = "session_id" if fmt == "claude" else "thread_id"
+        (self.home / "agents.yaml").write_text(yaml.safe_dump({"agents": {"fake": agent}}), encoding="utf-8")
+
+    def calls(self):
+        p = Path(str(self.plan) + ".calls")
+        return [json.loads(ln) for ln in p.read_text().splitlines()] if p.exists() else []
+
+
+@pytest.fixture
+def fake_agent(home, tmp_path):
+    return FakeAgent(home, tmp_path)
