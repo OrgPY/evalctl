@@ -10,11 +10,12 @@
 
 范围：
 
+- 一个 prompt 之内的主线：`contract`（从任务现场生成验收清单）、`check`、`repeat`（会话内独立复跑）、对账
 - 检查和回执：`check`、`verify`、`stats`
 - 驱动 agent：`run`（外循环）、`bench`（跑批和回归对比）、`agents`
-- 生成和审查检查配置：`learn`、`review`、`feedback`、`lint`、`judge`
+- 生成和审查检查配置：`learn`、`review`、`feedback`、`lint`、`judge`，以及只在你手动运行时使用的 `improve`
 - 失败归因：`explain`
-- 一个通用 skill、一个 Stop hook、示例工作流和样例
+- 一个通用 skill、两个 Claude Code hook（UserPromptSubmit 和 Stop）、示例工作流和样例
 
 不做代理网关、文件监听、GUI。
 
@@ -35,6 +36,9 @@ evalctl --version
 | `checks/<name>.yaml` | 检查配置 |
 | `judge.yaml` | `llm_rubric` 用的评分模型 |
 | `key` | HMAC 签名密钥，第一次通过时生成，权限 600 |
+| `contracts/` | 验收清单（`<任务哈希>.yaml`）、各目录当前生效的清单和档位（`state/`）、任务开始时的文件副本（`baseline/`） |
+| `settings.yaml` | 触发词、`repeat` 默认用的适配器，第一次用 `contract` 时生成 |
+| `improve/<name>.yaml` | `improve` 的提议和你的审批记录 |
 | `agents.yaml` | agent 适配器（`run` / `bench` 用），第一次用到时自动生成 |
 | `runs.sqlite` | 每次 check 的运行记录、每条 `feedback` 判断、`judge` 的两两评审、`explain` 的结果 |
 | `lint/<name>.json` | `lint` 的结果缓存，按配置哈希 |
@@ -75,7 +79,10 @@ Round 1 of 3. Fix only the FAIL items above, leave everything that passed untouc
 每个命令一个最小示例：
 
 ```bash
-evalctl check                                         # 检查当前目录，全过则写回执
+evalctl contract --task "把事故报告写到 report.md，要有根因"   # 开工：从任务生成验收清单
+evalctl check                                         # 检查当前目录（清单 + 配置），全过则写回执
+evalctl repeat                                        # 会话内：K 个独立运行，返回分歧清单
+evalctl improve forum_scrape                          # 手动：从历史记录提议修改配置，你批准才生效
 evalctl verify --dir out/                             # 回执现在还有效吗
 evalctl stats                                         # 通过率、轮数、服从率、评分一致率
 evalctl run --agent claude "把 page.html 里的帖子抽到 posts.jsonl"    # 调 agent → 检查 → 反馈 → 重复
@@ -97,6 +104,9 @@ evalctl judge out_a/ out_b/ --config incident         # 两份产出选一份，
 
 ```text
 evalctl check  [--dir DIR] [--config NAME] [--profile P] [--inputs DIR] [--trajectory FILE] [--json] [--worker FAMILY]
+evalctl contract [--task TEXT|FILE|-] [--dir DIR] [--profile P] [--new] [--clear] [--json]
+evalctl repeat [-k K] [--agent NAME] [--task TEXT|FILE] [--dir DIR] [--profile P] [--json]
+evalctl improve CONFIG [--apply] [--approve ID ...] [--json]
 evalctl verify [--dir DIR] [--config NAME] [--profile P] [--json]
 evalctl stats  [--config NAME] [--json]
 evalctl run --agent NAME [--dir DIR] [--config NAME] [--profile P] [--inputs DIR] [--max-rounds N] [--json] "任务"
@@ -114,7 +124,7 @@ evalctl judge --bench RUN_A RUN_B [--task ID]
 evalctl judge --stats [--config NAME]
 ```
 
-**check。** 配置的选择顺序：`--config`，否则在目录及其父目录里找最近的 `.evalctl.yaml`。不带 `--dir` 时，检查的是 `.evalctl.yaml` 所在的目录，所以在子目录里运行也可以。硬检查先跑，全部通过后才跑 `llm_rubric`。默认输出文字清单，`--json` 输出 JSON（里面也带那份文字）。
+**check。** 配置的选择顺序：`--config`，否则在目录及其父目录里找最近的 `.evalctl.yaml`。两者都没有、但目录有生效的验收清单时，只按清单检查。不带 `--dir` 时，检查的是 `.evalctl.yaml` 所在的目录，所以在子目录里运行也可以。硬检查先跑，全部通过后才跑 `llm_rubric`。默认输出文字清单，`--json` 输出 JSON（里面也带那份文字）。
 
 | 退出码 | 含义 |
 | --- | --- |
@@ -324,6 +334,151 @@ evalctl feedback --dir out/ --verdict bad --note "最大一笔支出写错了"
 
 局限：`learn` 能找出求和、计数和查找关系，找不出所有关系（最大值、比例、排序）；这类修改会报告为未转换，可以手写 `python` 或 `llm_rubric` 检查来覆盖。单个样例分不清规则和巧合，所以不经 `review` 不会写入任何配置。
 
+## 一个 prompt 之内：清单 → 检查 → 重复 → 对账
+
+目标是你给 agent 一个 prompt，它在**同一个会话里**自己验证、自己重复运行、自己对账，交到你手上时已经是它能做到的最好版本。流程：
+
+```text
+开工    evalctl contract --task "<你的原话>"     由另一家模型把任务拆成验收清单（Claude Code 下由 hook 自动完成）
+完成    evalctl check                            逐条验证清单 + 已配置的检查；按失败项修改，最多 3 轮
+重要任务 evalctl repeat                           另起 K 个独立运行，返回它们和当前产出的分歧
+        在 .eval/reconcile.md 里逐项对账          回到原始输入查证，写明采用的值和依据；查不出来的列为"需人工判断"
+        evalctl check                            通过后写回执：repeated: K、reconciled: true/false
+```
+
+### 现场验收清单：evalctl contract
+
+没有检查配置的任务，以前什么都不会发生。现在任何一个 prompt 都有东西可查：
+
+```bash
+evalctl contract --task "把事故报告写到 report.md。必须有 Summary 章节，列出所有受影响的服务，说明根因。"
+evalctl contract --task task.md          # 也可以给文件，或用 - 从 stdin 读
+evalctl contract                         # 查看当前目录生效的清单
+```
+
+```text
+evalctl contract: 7 acceptance item(s) for /path/to/work
+written by: command:codex   contract: 09c5d0d306678a2b
+
+[deliverable] incident_report: Write the incident report to report.md.
+[requirement] summary_section: The report must have a Summary section.
+[requirement] affected_services: The report must list every affected service.
+[requirement] root_cause: The report must state the root cause.
+[generic] g_files_exist: Every file the task asks for exists and is not empty: report.md
+[generic] g_numbers_traceable: Every number in the output can be traced to its source.
+[generic] g_nothing_unfinished: The output has no placeholder or unfinished marker.
+```
+
+- **谁来写**：评分模型配置（`judge.yaml`）里第一个和干活的模型**不同家**的模型。每个要求的交付物一项，每条明确要求一项，每项都写清通过和不通过的条件。模型被要求只列任务真正要求的东西，不自己加要求。
+- **通用项**由 evalctl 固定追加：要求的文件都存在且非空（脚本验证）；产出里的数字能在输入里找到或能由输入重算出来（模型验证）；没有 TODO、TBD、占位符（脚本验证）。
+- **存在哪**：`~/.evalctl/contracts/<任务哈希>.yaml`，不在工作目录里，用回执密钥签名。同时记下"这个目录当前生效哪些清单"（`contracts/state/`），并把目录此刻的文件存一份（`contracts/baseline/`），供 `repeat` 的独立运行从同一起点出发。
+- **check 自动加载**当前目录生效的清单，和已配置的检查一起跑；**没有检查配置时只跑清单**（`.evalctl.yaml` 可以没有，也可以不写 `config:`）。脚本能验证的项总是跑；需要模型验证的项和 `llm_rubric` 一样，其余检查全过之后才跑，一个清单一次模型调用。每个清单项是一条独立结果（`contract.<项名>`），失败时写明缺的是哪一项、在哪。回执里记录清单的哈希。
+- **无法核对的项**：任务目录里没有任何材料能印证产出内容时（例如你没给输入），已交付的项算通过，但标注为"未对照任何来源核实"，并提示 agent 把这一点告诉你。没交付、只交付一半、形状不对、和已有文件矛盾的，照常失败。
+- **追加而不是替换**：同一个目录 12 小时内再次调用 `contract`（比如你追加了一句要求），新清单和旧清单一起生效，之前的要求不会被悄悄丢掉。新会话（hook 下按 session 判断）、`--new`、`evalctl run` 会开始一个新任务；`--clear` 清除。
+
+**agent 改不了清单。** 清单和状态文件都有签名，被改动后 `check` 以退出码 2 结束，`verify` 失败。回执记录清单哈希：清单被换掉、被追加一个更容易的任务、状态文件被删，`verify` 都会失败。由 evalctl 启动的会话（`run` 的 agent、`repeat` 的子运行）调用 `contract` 不起作用；Claude Code 里 hook 写出的清单，agent 也不能用 `--new` 换掉。和回执一样，这防的是无意和省事，防不住和你同一个系统用户的 agent 故意去读密钥。
+
+任务文本从哪来：
+
+| 方式 | 任务文本的来源 |
+| --- | --- |
+| `evalctl run` / `bench` | 引擎在调 agent 之前传入 |
+| Claude Code + UserPromptSubmit hook | hook 拿到你的原话，后台生成清单；`check` 会等它写完 |
+| 其他 agent（skill） | agent 开工时调用 `evalctl contract --task "<用户原话>"` |
+
+`.evalctl.yaml` 里可以写 `contract: required`（没有清单就报错）或 `contract: off`（这个目录不用清单），默认 `auto`。
+
+### 会话内的 repeat
+
+```bash
+evalctl repeat                 # K 取当前档位的 repeat.k，默认 3
+evalctl repeat -k 3 --agent claude --task task.md
+```
+
+由正在干活的 agent 自己在会话里调用。evalctl 用适配器并行另起 K 个独立运行：各自拿到**任务开始时**的文件副本（不含当前 agent 的任何产出），在各自的临时目录里做同一个任务、各自过 `check`（各自最多 3 轮）。副本和主工作目录互相看不见，子运行的 prompt 里也不出现主目录的路径。
+
+返回给调用方的是分歧清单，不是结论：
+
+```text
+evalctl repeat: 3 independent run(s) by claude, 2 difference(s) from your output
+your output: check PASS
+run 1: check PASS after 1 round(s)
+run 2: check PASS after 2 round(s)
+run 3: check PASS after 1 round(s)
+
+Same result in every run (9): contract.report_md, contract.category_totals, ...
+
+Checks that failed in other runs (your output may have the same weakness; look before you trust it):
+  - contract.g_numbers_traceable: run 2: ...
+
+DIFFERENCES (2). These are not verdicts: the other runs can be the wrong ones.
+  D1 [number] report.md: numbers differ from run 1, run 3: yours 1448.24 (line 14), 12 (line 16)
+      yours: 1448.24 (line 14), 12 (line 16)
+      run 1: has 1351.94, 11 where you have 1448.24, 12
+      run 3: has 1351.94, 11 where you have 1448.24, 12
+  D2 [conclusion] whether the repeated Team Lunch row is counted twice
+      yours: report.md line 9: counted as two expenses
+      run 1: treated as a duplicate entry and counted once
+```
+
+- **比什么**：各运行的检查结果；产出了哪些文件、JSON / CSV 的字段名（`structure`）；文件里的数值（`number`）；以及由评分模型读各份产出后列出的内容差异（`conclusion`，一次模型调用，没有可用模型时跳过并注明）。每项分歧有编号 D1、D2……
+- **一致项**和**其他运行失败过的检查项**单独列出。别的运行在某项检查上失败过，说明这项容易出错，值得回头看自己的产出。
+- **不做多数表决，不自动合并。** 三个运行都和你不一样，也不代表它们对。子运行的产出保存在 `.eval/repeat/N/output/`，完整报告在 `.eval/repeat/report.md`。
+- **防递归**：子运行带着环境变量 `EVALCTL_CHILD=1` 启动，hook 对它们不生效（`EVALCTL_HOOK=off`），它们的 `check` 不要求 repeat，它们调用 `evalctl repeat` 会被直接跳过。
+- **耗时**：K 个完整的 agent 运行，通常几分钟到十几分钟。在 Claude Code 里要用最长的命令超时，或者放后台等它结束，skill 和 hook 的提示里都写了。
+- repeat 需要任务开始时的文件，所以必须在开工时调用过 `contract`（它会存起始文件；超过 200 MB 的目录不存，此时 repeat 不可用并说明原因）。
+
+**两个要知道的限制。** repeat 只能抓不稳定的错：如果 K 次都以同样的方式错了，它们会完全一致，这类系统性的错只能靠检查和验收清单抓。成本和时间是 K 倍，所以按任务价值分档，日常只做 contract + check。
+
+### 同一会话内对账：.eval/reconcile.md
+
+拿到分歧清单的还是原来那个 agent，它有完整的上下文。它要回到**原始输入**逐项查证，改正自己的产出，并把每一项写进 `.eval/reconcile.md`：
+
+```markdown
+## D1
+adopted: 1351.94
+evidence: expenses.csv 第 10-11 行是同一天同一商户同一金额的两条 Team Lunch；brief.md 没有说明是否重复
+
+## D2
+needs_human: expenses.csv 里看不出第 11 行是重复录入还是第二次午餐
+```
+
+然后重跑 `evalctl check`。evalctl 不判断谁对，它检查的是：
+
+- 每个分歧编号都有一节；
+- 写了 `adopted:` 的必须有 `evidence:`，而且依据里要点名一个任务里真实存在的文件（"其他几次都这么写"不算依据）；
+- 输入定不下来的不许硬选，写 `needs_human:` 并说明原因。
+
+不满足时 `check` 失败，失败项叫 `reconcile`，逐条说明缺什么。通过后回执带上：
+
+```json
+"repeated": 3, "reconciled": false, "divergences": 2, "needs_human": 1
+```
+
+`reconciled` 只有在所有分歧都凭依据定下来时才是 `true`；有留给你判断的项时是 `false`，回执仍然有效，`check` 的输出和 agent 的交付说明里会列出这些项。`evalctl verify` 会显示这一行。
+
+### 分档：daily 和 high_stakes
+
+两个档位内置，任何目录都可用，不需要 `.evalctl.yaml`：
+
+| 档位 | 做什么 |
+| --- | --- |
+| `daily`（默认） | contract + check |
+| `high_stakes` | 再加 repeat，k=3，以及对账 |
+
+切到 `high_stakes` 的方式：在 prompt 里写触发词（默认"重要"、"important"、"high-stakes"），或者用 `--profile high_stakes` / `EVALCTL_PROFILE`。触发词放在 `~/.evalctl/settings.yaml`：
+
+```yaml
+triggers:
+  high_stakes: ["重要", "important", "high-stakes", "high stakes"]
+default_agent: ""          # repeat 用哪个适配器起子运行；空 = 调用它的那个 agent（Claude Code → claude）
+contract_min_chars: 40     # hook 只给不短于这个长度的 prompt 生成清单
+```
+
+档位由 `contract` 在读到任务文本时定下，记在任务状态里；优先级是 `--profile` > `EVALCTL_PROFILE` > 触发词定下的档位 > `.evalctl.yaml` 的 `profile:`。`.evalctl.yaml` 的 `profiles:` 可以重新定义这两个档位（比如把 k 改成 5）。
+
+在要求 repeat 的档位下，agent 自己调用的 `check` 在其他项全过之后会多出一条失败项 `repeat`，告诉它现在去跑 `evalctl repeat`；repeat 跑完、对账写完，`check` 才写回执。
+
 ## 外循环：evalctl run
 
 skill 是让 agent 自己调 `check`。`run` 反过来：evalctl 调 agent，自己判断产出，自己把失败清单喂回去。
@@ -340,6 +495,8 @@ evalctl: round 2/3: calling claude (continuing the session)
 evalctl: round 2/3: check PASS
 evalctl run: PASS  (2 round(s))
 ```
+
+开始前，引擎先用任务文本生成验收清单（和你手动调 `evalctl contract` 一样；没有可用模型时跳过并说明，已配置的检查照常跑）。
 
 每一轮：调 agent → 对比工作目录调用前后的文件哈希，确定它产出了什么（不问 agent）→ `check` → 有失败就把失败清单作为下一轮的输入，续接同一个会话。
 
@@ -483,7 +640,7 @@ profiles:
   calibrate:   { judge_repeat: {n: 4, agree: 4, when: always} }
 ```
 
-**profile 的选择顺序**：`--profile`，然后环境变量 `EVALCTL_PROFILE`，最后是文件里的 `profile:`。profile 只覆盖它写到的键，其余沿用 loop 段。名字不在 `profiles` 里、又不是文件自己的 `profile:` 值时报错，不会悄悄退回默认。
+**profile 的选择顺序**：`--profile`，然后环境变量 `EVALCTL_PROFILE`，然后是 `contract` 根据触发词给当前任务定下的档位，最后是文件里的 `profile:`。`daily` 和 `high_stakes` 两个档位是内置的（见"分档"）。profile 只覆盖它写到的键，其余沿用 loop 段。名字不在 `profiles` 里、又不是文件自己的 `profile:` 值时报错，不会悄悄退回默认。
 
 ```bash
 evalctl check --profile high_stakes
@@ -528,7 +685,7 @@ evalctl verify --profile high_stakes
 
 ### repeat：通过后独立复跑
 
-只在 `evalctl run` 下生效（`bench` 见下）。任务通过后，从**同一份起始文件**出发，在临时目录里再独立跑 k 次（各自是新会话、完整的外循环），然后比较：
+这一节讲的是 `evalctl run` 外循环里的 repeat（`bench` 见下）。agent 在自己会话里调用的 `evalctl repeat` 和对账见前面"一个 prompt 之内"一节，两者共用 `repeat.k` 和 `when: on_pass` 这两个设置。任务通过后，从**同一份起始文件**出发，在临时目录里再独立跑 k 次（各自是新会话、完整的外循环），然后比较：
 
 - `check_results`：每项检查的结论是否相同。
 - `numbers`：产出文件里的数值（日期和时间不算）是否相同。
@@ -540,7 +697,7 @@ evalctl verify --profile high_stakes
 
 复跑的轮次、产出和结果保存在 `.eval/repeat/N/`。
 
-agent 通过 skill 自己调 `check` 时没法复跑，repeat 被忽略，输出里会说明；这样写出的回执在要求 repeat 的 profile 下通不过 `verify`。`bench` 下每个任务本来就跑 k 次，所以不再嵌套复跑，直接报告 pass^k。
+agent 通过 skill 自己调 `check` 时，其余项全过后会被要求去跑 `evalctl repeat` 并对账，之后才写回执。`bench` 下每个任务本来就跑 k 次，所以不再嵌套复跑，直接报告 pass^k。
 
 ## lint：审查检查配置本身
 
@@ -709,7 +866,14 @@ evalctl judge --stats                      # 评分模型和你的一致率
 
 ## Skill
 
-`skill/evalctl/SKILL.md` 对所有工作流、所有 agent 通用。内容是：交付前必须跑 `evalctl check`；只改失败项；最多 3 轮；仍失败就原样报告剩余失败项；不许碰 `.eval/` 和检查配置。
+`skill/evalctl/SKILL.md` 对所有工作流、所有 agent 通用。流程是：
+
+1. 开工时 `evalctl contract --task "<用户原话>"`（已被告知 hook 在生成清单时跳过）；
+2. 完成后 `evalctl check`，只改失败项，最多 3 轮，仍失败就原样报告剩余失败项；
+3. `check` 要求 repeat 时调用 `evalctl repeat`，回到原始输入逐项对账，写 `.eval/reconcile.md`，查不出来的写 `needs_human`，再跑 `check`；
+4. 有有效回执才交付，并在交付说明里写明：清单通过了几项、每项分歧怎么处理的、哪些项需要你判断。
+
+另外规定：不许碰验收清单、回执、`.evalctl.yaml` 和 `~/.evalctl/`（`.eval/` 里只许写 `reconcile.md`）；环境变量 `EVALCTL_CHILD` 存在时自己就是别人的子运行，不许再调 repeat。
 
 | Agent | 安装方法 |
 | --- | --- |
@@ -720,13 +884,34 @@ evalctl judge --stats                      # 评分模型和你的一致率
 
 skill 只能要求，不能强制。让"跳过"变得可见的是回执：没有 hook 的 agent 交活时，先跑 `evalctl verify --dir <产出目录>` 再验收。
 
-## Claude Code Stop hook
+## Claude Code hooks
 
-`hooks/evalctl_stop_hook.py` 在 Claude 每次想结束回合时运行。
+两个 hook 配合：UserPromptSubmit 在你提交 prompt 时生成验收清单，Stop 在 Claude 想结束时把关。
+
+### UserPromptSubmit：从你的原话生成清单
+
+`hooks/evalctl_prompt_hook.py` 在每次提交 prompt 时运行，只在以下情况起作用：
 
 | 情况 | 结果 |
 | --- | --- |
-| 会话目录及其父目录里没有 `.evalctl.yaml` | 正常结束。和检查无关的会话完全不受影响。 |
+| 会话目录（或父目录）有 `.evalctl.yaml` | 为这个 prompt 生成验收清单 |
+| prompt 里有触发词（默认"重要"、"important"） | 生成清单，并把任务放到 `high_stakes` 档位；不需要 `.evalctl.yaml` |
+| 同一会话里之前的 prompt 已经受管 | 这个 prompt 的清单追加进去 |
+| 以上都不是 | 什么都不做，会话完全不受影响 |
+
+短于 `contract_min_chars`（默认 40 个字符）的 prompt 当作"好的，继续"这类跟进，不生成新清单。hook 不会阻止 prompt。它往上下文里加一段说明：这个任务受管、清单正在生成、完成后跑 `evalctl check`、档位要求 repeat 时怎么做、交付时要报告什么。
+
+清单由模型生成，要几十秒，而 Claude Code 给这个事件的默认超时是 30 秒，所以 hook 只登记任务、存起始文件，模型调用放到一个脱离的后台进程里；`evalctl check` 遇到还没写完的清单会等它（写的进程没了就自己写）。
+
+hook 的格式按[官方 hooks 文档](https://code.claude.com/docs/en/hooks)的 UserPromptSubmit 约定，并在 Claude Code 2.1.322 上实测确认：stdin 的 JSON 里有 `prompt`、`session_id`、`cwd`；stdout 输出 `{"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": "..."}}`，其中的文字会和 prompt 一起交给 Claude；这个事件不支持 matcher，每次都触发。
+
+### Stop：没有有效回执就不让结束
+
+`hooks/evalctl_stop_hook.py` 在 Claude 每次想结束回合时运行。受管的条件是：目录有 `.evalctl.yaml`，或者这个目录有生效的验收清单（本会话的 hook 写的，或 agent 12 小时内通过 skill 写的）。`verify` 同时校验：清单已生成、没被改过、每项都通过；档位要求 repeat 时回执里有 repeated 记录并且分歧已对账。
+
+| 情况 | 结果 |
+| --- | --- |
+| 会话目录及其父目录里没有 `.evalctl.yaml`，也没有生效的验收清单 | 正常结束。和检查无关的会话完全不受影响。 |
 | `evalctl verify` 通过 | 正常结束。 |
 | 没有有效回执，但 `evalctl check` 通过 | hook 跑的这次 check 写了回执，正常结束。 |
 | `evalctl check` 失败 | 阻止结束，把失败清单作为原因交给 Claude。 |
@@ -737,6 +922,17 @@ skill 只能要求，不能强制。让"跳过"变得可见的是回执：没有
 ```json
 {
   "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/evalctl/hooks/evalctl_prompt_hook.py\"",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
     "Stop": [
       {
         "hooks": [
@@ -763,9 +959,30 @@ hook 脚本只用标准库，会在 `PATH`、`~/.local/bin` 或 `$EVALCTL_BIN` �
 - hook 把 `transcript_path`（本次会话的记录）作为轨迹交给 `evalctl check`，所以配置里的 `action_policy` 检查在 hook 下也会跑。
 - 用 `evalctl run` 驱动 Claude Code 时，evalctl 给它设了 `EVALCTL_HOOK=off`：那时把关的是外循环，hook 不重复拦。
 
+## improve：手动的跨任务改进
+
+`improve` 不属于任何交付流程，对当前这一次任务没有帮助；它读很多次任务留下的记录，提议怎么改检查配置，等你批准。只在你手动运行时使用：
+
+```bash
+evalctl improve forum_scrape             # 列出提议，什么都不改
+evalctl improve forum_scrape --apply     # 逐条问你，批准的才应用
+evalctl improve forum_scrape --approve P1 P3
+```
+
+| 证据 | 提议 |
+| --- | --- |
+| 某项检查失败、而你用 `feedback --verdict good` 推翻了它 2 次以上 | 删除这项检查（可应用） |
+| 某个评分项的重复评分一致率不超过 75%，或多次没有稳定结论 | 删除这个评分项，或改写它（可应用） |
+| `explain` 多次把失败归因为"检查器误判"并指向同一项检查 | 删除这项检查，或收窄它（可应用） |
+| 通过了全部检查而你判为 bad 的产出 | 建议：用它跑 `learn` |
+| `explain` 里最常见的失败原因 | 建议：跑 `explain --cluster`，把缺的东西补进任务说明或提示 |
+| `llm_rubric` 和你的两两评审一致率低；有待 `review` 的候选；上次 `lint` 有发现 | 建议：对应的命令 |
+
+应用时旧配置存为 `<name>.yaml.bak`。注意应用会重写 YAML，原文件里的注释不保留。应用后建议跑一次 `evalctl lint`。
+
 ## 回执能证明什么，不能证明什么
 
-`.eval/receipt.json` 记录：每个产出文件的路径、大小、SHA-256；配置名、路径、哈希；通过时间；第几轮；每项检查的一行摘要；使用的 profile、各开关的取值（`switches`）以及每个开关实际跑了什么（`ran`：lint 审的是哪个配置哈希、重复评分的 n 和不稳定项、repeat 的 k 和是否一致）。用 `~/.evalctl/key` 做 HMAC-SHA256 签名。
+`.eval/receipt.json` 记录：每个产出文件的路径、大小、SHA-256；配置名、路径、哈希；通过时间；第几轮；每项检查的一行摘要（含每个验收清单项）；生效的验收清单的哈希（`contracts`）；会话内 repeat 的结果（`repeated`、`reconciled`、`divergences`、`needs_human`）；使用的 profile、各开关的取值（`switches`）以及每个开关实际跑了什么（`ran`：lint 审的是哪个配置哈希、重复评分的 n 和不稳定项、repeat 的 k 和是否一致）。用 `~/.evalctl/key` 做 HMAC-SHA256 签名。
 
 `verify` 除了核对签名和哈希，还按**现在生效**的 loop 设置和 profile 核对开关：配置要求 lint、judge_repeat 或 repeat，而回执里没有对应记录，回执就无效。
 
@@ -782,6 +999,6 @@ uv venv && uv pip install -e ".[dev]"
 .venv/bin/python -m pytest
 ```
 
-245 个测试，覆盖每种检查类型、配置选择、退出码、回执和各种篡改、轮数、统计、用 Stop hook 的 JSON 驱动 hook 脚本、`learn` / `review` / `feedback`（初稿终稿、多终稿、git 初稿），以及 v0.6 的外循环、跑批对比、循环内开关、`lint`、`explain`、`action_policy`、`judge`。`run` 和 `bench` 用一个按剧本行动的假 agent（`tests/fake_agent.py`）测试，它输出 Claude Code 或 Codex 格式的轨迹。模型评分的检查用一个本地假服务器测试（它同时实现 Anthropic 和 OpenAI 两种协议格式），所以整套测试可以离线跑。想看真实模型怎么判 rubric，配好评分模型后对 `fixtures/forum_scrape/nav_body` 和 `fixtures/forum_scrape/good` 运行 `evalctl check`。
+280 个测试，覆盖每种检查类型、配置选择、退出码、回执和各种篡改、轮数、统计、用 Stop hook 的 JSON 驱动 hook 脚本、`learn` / `review` / `feedback`（初稿终稿、多终稿、git 初稿），验收清单、会话内 repeat 和对账、两个 hook、清单防篡改、`improve`，以及 v0.6 的外循环、跑批对比、循环内开关、`lint`、`explain`、`action_policy`、`judge`。`run` 和 `bench` 用一个按剧本行动的假 agent（`tests/fake_agent.py`）测试，它输出 Claude Code 或 Codex 格式的轨迹。模型评分的检查用一个本地假服务器测试（它同时实现 Anthropic 和 OpenAI 两种协议格式），所以整套测试可以离线跑。想看真实模型怎么判 rubric，配好评分模型后对 `fixtures/forum_scrape/nav_body` 和 `fixtures/forum_scrape/good` 运行 `evalctl check`。
 
 `python3 fixtures/forum_scrape/build.py` 可以重新生成样例。

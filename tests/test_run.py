@@ -35,7 +35,7 @@ def test_fail_then_feedback_then_pass(proj, fake_agent):
     assert "[FAIL] no_todo" in second["prompt"] and "TODO" in second["prompt"]
     assert "do not run evalctl yourself" in second["prompt"]
     # the Stop hook and a skill-driven check are kept out of the way while the outer loop drives
-    assert first["env"] == {"EVALCTL_HOOK": "off", "EVALCTL_OUTER": "1", "EVALCTL_WORKER": "anthropic"}
+    assert first["env"] == {"EVALCTL_HOOK": "off", "EVALCTL_OUTER": "1", "EVALCTL_WORKER": "anthropic", "EVALCTL_CHILD": None}
 
 
 def test_every_round_is_kept_on_disk(proj, fake_agent):

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "evalctl"
-version = "0.6.0"
+version = "0.7.0"
 description = "Lightweight quality gate for AI agent output: check, fix, re-check, signed receipt."
 readme = "README.md"
 requires-python = ">=3.9"

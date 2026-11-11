@@ -8,9 +8,12 @@ Input and output follow https://code.claude.com/docs/en/hooks (Stop):
           {"systemMessage": "..."}               -> Claude may stop, the user sees a warning
 
 Behaviour:
-  * No .evalctl.yaml in the session directory or its parents: allow. Sessions
-    that have nothing to do with evalctl are never affected.
-  * `evalctl verify` passes: allow.
+  * No .evalctl.yaml in the session directory or its parents, and no acceptance
+    contract active for it: allow. Sessions that have nothing to do with evalctl
+    are never affected.
+  * `evalctl verify` passes: allow. Verify covers the acceptance contract (written,
+    unchanged, every item passed) and, when the profile requires repeat, that the
+    receipt records the repeat and its reconciliation.
   * Otherwise run `evalctl check`. PASS writes the receipt: allow. FAIL: block
     and hand the failure list to Claude.
   * Once the round limit is reached (or evalctl cannot run at all), Claude is
@@ -39,6 +42,30 @@ def find_pointer(start):
     for p in [d, *d.parents]:
         if (p / POINTER).is_file():
             return p / POINTER
+    return None
+
+
+def gated_by_contract(cwd, session_id):
+    """An acceptance contract is active for this directory (no .evalctl.yaml needed): written by the
+    prompt hook for this very session, or by the agent through the skill within the last 12 hours."""
+    import hashlib
+    import time
+    try:
+        real = str(Path(cwd).resolve())
+    except OSError:
+        return None
+    home = Path(os.environ.get("EVALCTL_HOME") or Path.home() / ".evalctl").expanduser()
+    f = home / "contracts" / "state" / (hashlib.sha256(real.encode("utf-8")).hexdigest()[:20] + ".json")
+    try:
+        state = json.loads(f.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not (state.get("contracts") or state.get("pending")):
+        return None
+    if state.get("source") == "hook":
+        return real if state.get("session") == session_id else None
+    if state.get("source") == "cli" and time.time() - float(state.get("updated") or 0) < 12 * 3600:
+        return real
     return None
 
 
@@ -74,7 +101,8 @@ def main():
         data = json.load(sys.stdin)
     except ValueError:
         data = {}
-    if os.environ.get("EVALCTL_HOOK", "").lower() == "off" or os.environ.get("EVALCTL_IN_JUDGE"):
+    if os.environ.get("EVALCTL_HOOK", "").lower() == "off" or os.environ.get("EVALCTL_IN_JUDGE") \
+            or os.environ.get("EVALCTL_CHILD"):
         allow()
 
     pointer = None
@@ -83,9 +111,12 @@ def main():
             pointer = find_pointer(start)
             if pointer:
                 break
-    if pointer is None:
+    root = str(pointer.parent) if pointer else None
+    if root is None and data.get("cwd"):
+        root = gated_by_contract(data["cwd"], data.get("session_id"))
+    if root is None:
         allow()
-    root = str(pointer.parent)
+    gate = str(pointer) if pointer else "an acceptance contract"
     again = bool(data.get("stop_hook_active"))  # Claude is already continuing because of a Stop hook
 
     def give_up(problem):
@@ -99,7 +130,7 @@ def main():
     os.environ.setdefault("EVALCTL_WORKER", "anthropic")
     evalctl = find_evalctl()
     if evalctl is None:
-        give_up(f"this directory is gated by {pointer} but the `evalctl` command was not found "
+        give_up(f"this directory is gated by {gate} but the `evalctl` command was not found "
                 "(install it or set EVALCTL_BIN).")
 
     try:

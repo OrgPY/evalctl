@@ -99,7 +99,7 @@ def key_numbers(workdir: Path, patterns: Optional[List[str]]) -> Dict[str, List[
     for p in receipt.list_artifacts(workdir, patterns):
         text = read_text(p)
         if text is not None:
-            out[p.relative_to(workdir).as_posix()] = sorted(str(n.value.normalize()) for n in file_numbers(p, text))
+            out[p.relative_to(workdir).as_posix()] = sorted(format(n.value.normalize(), "f") for n in file_numbers(p, text))
     return out
 
 
@@ -141,12 +141,23 @@ def _summary(res: "RunResult", conf: cfg.Config) -> Dict[str, Any]:
 def run_task(dir_arg: Optional[str], agent_name: str, task: str, *, config_arg: Optional[str] = None,
              profile_arg: Optional[str] = None, inputs_arg: Optional[str] = None,
              max_rounds: Optional[int] = None, mode: str = "run", allow_repeat: bool = True,
-             record: bool = True, say: Callable[[str], None] = lambda s: None) -> RunResult:
+             record: bool = True, say: Callable[[str], None] = lambda s: None, child: bool = False) -> RunResult:
+    """`child`: this is one of the independent runs of `evalctl repeat`; the agent is told so
+    (EVALCTL_CHILD=1) and must not start repeats of its own."""
     agent = ag.get_agent(agent_name)
     # Everything that can be wrong with the setup is found before the agent spends a token.
-    workdir, cpath, pointer = cfg.select(dir_arg, config_arg)
-    conf = cfg.load(cpath, workdir)
-    loop = lp.from_pointer(pointer, profile_arg)
+    workdir, cpath, pointer = engine.resolve_target(dir_arg, config_arg)
+    if record and (cfg.pointer_data(pointer) if pointer else {}).get("contract", "auto") != "off":
+        # The engine knows the task: write its acceptance contract before the agent starts.
+        from . import contract as ct, settings
+        try:
+            body = ct.create(workdir, task, agent.family, source="run",
+                             profile=ct.pick_profile(task, settings.load()["triggers"]))
+            say(f"acceptance contract: {len(body['items'])} item(s) from the task")
+        except ConfigError as e:
+            say("no acceptance contract for this task (" + str(e).splitlines()[0][:150] + "); the configured checks still run")
+    t = engine.load_target(str(workdir), str(cpath) if cpath else None, profile_arg, agent.family)
+    conf, loop = t["conf"], t["loop"]
     inputs = cfg.resolve_inputs(inputs_arg, pointer)
     limit = max_rounds or loop.max_rounds or conf.max_rounds
     want_repeat = loop.repeat_on and allow_repeat and mode == "run"
@@ -176,7 +187,7 @@ def run_task(dir_arg: Optional[str], agent_name: str, task: str, *, config_arg: 
             ext = "jsonl" if agent.output in ("json", "jsonl") else "txt"
             say(f"round {n}/{limit}: calling {agent.name}" + (" (continuing the session)" if res.session_id and agent.can_resume else ""))
             call = ag.invoke(agent, prompt, workdir, rd / f"trajectory.{ext}", rd / "stderr.txt",
-                             session_id=res.session_id)
+                             session_id=res.session_id, extra_env={"EVALCTL_CHILD": "1"} if child else None)
             res.session_id = call.session_id
             trajectories.append(call.stdout_path)
             after = _hashes(workdir)
@@ -188,7 +199,7 @@ def run_task(dir_arg: Optional[str], agent_name: str, task: str, *, config_arg: 
                  "session_id": call.session_id}, indent=2, ensure_ascii=False), encoding="utf-8")
             _snapshot(workdir, produced["added"] + produced["changed"], rd / "output")
 
-            out = engine.check(str(workdir), str(cpath), inputs_arg=str(inputs) if inputs else None,
+            out = engine.check(str(workdir), str(cpath) if cpath else None, inputs_arg=str(inputs) if inputs else None,
                                worker_arg=agent.family, profile_arg=profile_arg, source="cli", mode=mode,
                                agent=agent.name, trajectories=trajectories, task=(task_id, n),
                                defer_receipt=want_repeat or not record, record=record, max_rounds=limit)
@@ -254,8 +265,11 @@ def _repeat(res: RunResult, seed: Path, agent_name: str, task: str, conf: cfg.Co
         work = tmp / "work"
         try:
             shutil.copytree(seed, work)
+            from . import contract as ct
+            ct.clone_state(res.workdir, work)
             data = dict(cfg.pointer_data(pointer)) if pointer else {}
-            data["config"] = str(cpath)
+            if cpath:
+                data["config"] = str(cpath)
             data.pop("inputs", None)
             if inputs:
                 data["inputs"] = str(inputs)
@@ -273,6 +287,7 @@ def _repeat(res: RunResult, seed: Path, agent_name: str, task: str, conf: cfg.Co
             (dest / "result.json").write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
             say(f"repeat {i}/{k}: {again.status.upper()} after {len(again.rounds)} round(s)")
         finally:
+            ct.state_path(work).unlink(missing_ok=True)
             shutil.rmtree(tmp, ignore_errors=True)
     diffs = compare_runs(runs, what)
     passes = sum(r["status"] == PASS for r in runs[1:])

@@ -65,7 +65,7 @@ def test_unknown_profile_is_an_error_not_a_silent_default(proj):
     proj.pointer(**{k: v for k, v in SPEC_EXAMPLE.items() if k != "config"})
     proj.write("report.md", "x")
     code, _, err = proj.run("check", "--dir", str(proj.dir), "--profile", "hihg_stakes")
-    assert code == 2 and "profile 'hihg_stakes' is not defined" in err and "calibrate, high_stakes" in err
+    assert code == 2 and "profile 'hihg_stakes' is not defined" in err and "calibrate, daily, high_stakes" in err
 
 
 def test_loop_max_rounds_overrides_the_config(proj):
@@ -177,16 +177,22 @@ def test_verify_fails_when_the_config_requires_repeat_and_the_receipt_has_none(p
     proj.config([HARD])
     proj.pointer(loop={"repeat": {"k": 2, "when": "never"}}, profiles={"high_stakes": {"repeat": {"when": "on_pass"}}})
     proj.write("report.md", "x")
-    code, data = proj.check("--profile", "high_stakes")
-    # skill mode: repeat is ignored, and the output says so
-    assert code == 0 and any("Repeat only runs under `evalctl run`" in n for n in data["notes"])
-    assert "it was ignored here" in data["text"]
-    assert proj.verify()[0] == 0                                   # the default profile asks for no repeat
+    assert proj.check()[0] == 0 and proj.verify()[0] == 0          # the default profile asks for no repeat
     code, v = proj.verify("--profile", "high_stakes")
     assert code == 1 and "requires repeat (k=2, when: on_pass), but the receipt records no repeat run" in v["reasons"][0]
     # the same when the requirement is in the base loop section
     proj.pointer(loop={"repeat": {"k": 2, "when": "on_pass"}})
     assert proj.verify()[0] == 1
+
+
+def test_check_under_a_repeat_profile_asks_for_the_repeat_instead_of_writing_a_receipt(proj):
+    proj.config([HARD])
+    proj.pointer(loop={"repeat": {"k": 2, "when": "on_pass"}})
+    proj.write("report.md", "x")
+    code, data = proj.check()
+    assert code == 1 and not (proj.dir / ".eval/receipt.json").exists()
+    item = next(c for c in data["checks"] if c["id"] == "repeat")
+    assert item["status"] == "fail" and "Run `evalctl repeat -k 2` now" in item["failures"][0]
 
 
 def test_verify_fails_when_judge_repeat_is_required_but_was_not_run(proj, grader):
@@ -201,12 +207,13 @@ def test_verify_fails_when_judge_repeat_is_required_but_was_not_run(proj, grader
 
 def test_switch_records_are_covered_by_the_signature(proj):
     proj.config([HARD])
-    proj.pointer(loop={"repeat": {"k": 2, "when": "on_pass"}})
     proj.write("report.md", "x")
     proj.check()
+    proj.pointer(loop={"repeat": {"k": 2, "when": "on_pass"}})
     rp = proj.dir / ".eval/receipt.json"
     rec = json.loads(rp.read_text())
     rec["ran"]["repeat"] = {"ran": True, "k": 2, "agreed": True}     # the agent claims the repeat happened
+    rec["repeated"], rec["reconciled"] = 2, True
     rp.write_text(json.dumps(rec))
     code, v = proj.verify()
     assert code == 1 and "signature does not match" in v["reasons"][0]

@@ -187,3 +187,34 @@ class FakeAgent:
 @pytest.fixture
 def fake_agent(home, tmp_path):
     return FakeAgent(home, tmp_path)
+
+
+class TaskModel:
+    """Drives the fake grader for acceptance contracts: writing them, grading them, comparing repeat runs."""
+
+    def __init__(self, llm):
+        self.llm = llm
+        self.deliverables, self.requirements = [], []
+        self.grade = lambda item_id, outputs: True       # outputs: the "Files the agent created or changed" block
+        self.differences = []
+        self.prompts = []
+        llm.reply = self._reply
+
+    def _reply(self, prompt):
+        self.prompts.append(prompt)
+        if "Write the checklist" in prompt:
+            return json.dumps({"deliverables": self.deliverables, "requirements": self.requirements})
+        if "Checklist items:" in prompt:
+            ids = re.findall(r'^- id "([^"]+)":', prompt, re.M)
+            outputs = prompt.split("Files the agent created or changed (its output):", 1)[1].split("Other files in the working directory", 1)[0]
+            return json.dumps({"verdicts": [
+                {"id": i, "pass": bool(self.grade(i, outputs)),
+                 "reason": "found in the output" if self.grade(i, outputs) else f"nothing in the output satisfies {i}"} for i in ids]})
+        if "Attempt MAIN" in prompt:
+            return json.dumps({"differences": self.differences})
+        return "{}"
+
+
+@pytest.fixture
+def task_model(grader):
+    return TaskModel(grader)

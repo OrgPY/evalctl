@@ -10,11 +10,12 @@ A small quality gate for AI agent output. The agent runs `evalctl check` before 
 
 Scope:
 
+- the main line, inside one prompt: `contract` (an acceptance checklist made from the task itself), `check`, `repeat` (independent re-runs from within the session), reconciliation
 - checking and receipts: `check`, `verify`, `stats`
 - driving an agent: `run` (the outer loop), `bench` (batch runs and regression comparison), `agents`
-- building and reviewing check configs: `learn`, `review`, `feedback`, `lint`, `judge`
+- building and reviewing check configs: `learn`, `review`, `feedback`, `lint`, `judge`, and `improve`, which you run by hand
 - failure analysis: `explain`
-- one skill, one Stop hook, example workflows and fixtures
+- one skill, two Claude Code hooks (UserPromptSubmit and Stop), example workflows and fixtures
 
 No proxy, no file watcher, no GUI.
 
@@ -35,6 +36,9 @@ State lives in `~/.evalctl/`:
 | `checks/<name>.yaml` | check configs |
 | `judge.yaml` | grader models for `llm_rubric` checks |
 | `key` | HMAC signing key, created on the first pass, mode 600 |
+| `contracts/` | acceptance contracts (`<task hash>.yaml`), what is active per directory (`state/`), the files each task started from (`baseline/`) |
+| `settings.yaml` | trigger words, the adapter `repeat` uses; written on the first `contract` |
+| `improve/<name>.yaml` | proposals of `improve` and what you decided |
 | `agents.yaml` | agent adapters for `run` / `bench`, written on first use |
 | `runs.sqlite` | log of every check run, every `feedback` verdict, the pairwise judgements of `judge`, the results of `explain` |
 | `lint/<name>.json` | cached `lint` result, by config hash |
@@ -73,7 +77,10 @@ The other fixtures: `good` (passes), `missing_field`, `too_few`, `nav_body` (str
 One minimal example per command:
 
 ```bash
-evalctl check                                         # check this directory; a pass writes the receipt
+evalctl contract --task "Write the incident report to report.md, with the root cause"   # at the start
+evalctl check                                         # contract + configured checks; a pass writes the receipt
+evalctl repeat                                        # in the session: K independent runs, the differences come back
+evalctl improve forum_scrape                          # by hand: propose config changes from the record
 evalctl verify --dir out/                             # is the receipt still valid
 evalctl stats                                         # pass rate, rounds, compliance, grading consistency
 evalctl run --agent claude "Extract the posts from page.html into posts.jsonl"
@@ -95,6 +102,9 @@ All options:
 
 ```text
 evalctl check  [--dir DIR] [--config NAME] [--profile P] [--inputs DIR] [--trajectory FILE] [--json] [--worker FAMILY]
+evalctl contract [--task TEXT|FILE|-] [--dir DIR] [--profile P] [--new] [--clear] [--json]
+evalctl repeat [-k K] [--agent NAME] [--task TEXT|FILE] [--dir DIR] [--profile P] [--json]
+evalctl improve CONFIG [--apply] [--approve ID ...] [--json]
 evalctl verify [--dir DIR] [--config NAME] [--profile P] [--json]
 evalctl stats  [--config NAME] [--json]
 evalctl run --agent NAME [--dir DIR] [--config NAME] [--profile P] [--inputs DIR] [--max-rounds N] [--json] "TASK"
@@ -320,6 +330,79 @@ evalctl feedback --dir out/ --verdict bad --note "wrong largest expense"
 
 Limits: `learn` finds sums, counts and lookups, not every relation (a maximum, a ratio, a ranking); such edits are reported as not converted, and a `python` or `llm_rubric` check written by hand covers them. One example cannot tell a rule from a coincidence, which is why nothing is written without `review`.
 
+## Inside one prompt: contract, check, repeat, reconcile
+
+The aim: you give the agent one prompt, and in the **same session** it verifies its work, has it repeated independently, reconciles the differences, and hands back the best version it can produce.
+
+```text
+start      evalctl contract --task "<your request, word for word>"   another model turns the task into a checklist
+done       evalctl check                                             verifies the checklist and the configured checks; fix, max 3 rounds
+important  evalctl repeat                                            K independent runs; returns where they differ from this output
+           .eval/reconcile.md                                        each difference settled from the original inputs, or left to you
+           evalctl check                                             receipt with repeated: K, reconciled: true/false
+```
+
+### The acceptance contract
+
+```bash
+evalctl contract --task "Write the incident report to report.md. It must have a Summary section, list every affected service, and state the root cause."
+evalctl contract --task task.md          # a file, or - for stdin
+evalctl contract                         # show what is active for this directory
+```
+
+- **Written by** the first grader in `judge.yaml` that is from another model family than the worker: one item per deliverable, one per explicit requirement, each with a pass and a fail condition. It is told to list only what the task asks for.
+- **Generic items** are added by evalctl: requested files exist and are not empty (script); every number in the output is in an input or can be recomputed from the inputs (model); no TODO / TBD / placeholder is left (script).
+- **Stored** in `~/.evalctl/contracts/<task hash>.yaml`, outside the working directory, signed with the receipt key. evalctl also records which contracts are active for the directory and keeps a copy of the directory as it is at that moment, the starting point for `repeat`.
+- **`check` loads it automatically** and runs it with the configured checks; **with no check config, the contract is all that is checked** (`.evalctl.yaml` may be absent, or have no `config:`). Items a script can verify always run; graded items run after everything else passed, one model call per contract. Each item is its own result (`contract.<id>`), so a failure names the missing item and where. The receipt records the contract hash.
+- **Items that cannot be cross-checked**: when no file in the directory could confirm the delivered content (you gave no input material), a delivered item passes, marked "not cross-checked against any source", and the agent is told to say so. Missing, partial, wrongly shaped or contradicted items fail as usual.
+- **Added, not replaced**: another `contract` call for the same directory within 12 hours adds to the active set, so a follow-up request does not erase the earlier one. A new session (hooks), `--new` or `evalctl run` starts a new task; `--clear` removes it.
+
+**The agent cannot change its contract.** Contract and state are signed: after an edit `check` ends with exit code 2 and `verify` fails. The receipt records the contract hash, so swapping the contract, adding an easier task, or deleting the state all fail `verify`. A session started by evalctl (the agent of `run`, a child of `repeat`) cannot write a contract, and inside Claude Code the agent cannot `--new` a contract its user's prompt produced. As with the receipt, this stops shortcuts, not an agent that deliberately reads the signing key.
+
+The task text comes from the engine under `evalctl run` / `bench`, from the UserPromptSubmit hook under Claude Code, and from the agent itself (the skill tells it to call `evalctl contract` first) everywhere else. `.evalctl.yaml` accepts `contract: required | off` (default `auto`).
+
+### repeat, from inside the session
+
+```bash
+evalctl repeat                 # K from the task's profile (default 3)
+evalctl repeat -k 3 --agent claude
+```
+
+Called by the agent that is doing the work. evalctl starts K independent runs in parallel through the adapter. Each gets a copy of the files **as they were when the task started**, in its own temporary directory, does the same task and goes through its own `check`. The copies and the main directory cannot see each other.
+
+What comes back is a list of differences, never a winner: the check results of every run; files produced and field names (`structure`); numbers in the files (`number`); and differences in content found by a grader reading the outputs (`conclusion`: contradictions, and things the task asks for that one run delivers and another does not). It also lists what is the same in every run and which checks failed in other runs. **No majority vote, no merging.** The other runs' outputs are kept in `.eval/repeat/N/output/`, the report in `.eval/repeat/report.md`.
+
+Children are started with `EVALCTL_CHILD=1`: hooks do nothing for them, their `check` asks for no repeat, and `evalctl repeat` called by one is skipped. A repeat takes K full agent runs, usually several minutes; in Claude Code use the longest command timeout or run it in the background.
+
+**Two limits.** Repeats only catch errors that vary between runs: an error every run makes the same way looks like agreement, and only checks and the contract catch those. And cost and time are K times, so keep it for tasks that are worth it.
+
+### Reconciling in the same session
+
+The same agent, with its full context, goes back to the **original inputs** for each difference, corrects its output, and writes `.eval/reconcile.md`:
+
+```markdown
+## D1
+adopted: 1351.94
+evidence: expenses.csv lines 10-11 are the same Team Lunch entry twice
+
+## D2
+needs_human: expenses.csv does not show whether line 11 is a duplicate or a second lunch
+```
+
+Then it runs `evalctl check` again. evalctl does not decide who is right. It requires a section per difference; an `adopted:` value must come with `evidence:` naming a file that really is among the task's files ("the other runs say so" is not evidence); what the inputs do not settle must be `needs_human:`, not a choice. Otherwise the check item `reconcile` fails and says what is missing. The receipt then carries:
+
+```json
+"repeated": 3, "reconciled": false, "divergences": 2, "needs_human": 1
+```
+
+`reconciled` is `true` only when every difference was settled with evidence. With items left for you the receipt is still valid, and they are listed in the check output and in the agent's final message.
+
+### Profiles: daily and high_stakes
+
+Both are built in and need no `.evalctl.yaml`: `daily` (default) is contract + check; `high_stakes` adds repeat with k=3 and reconciliation. A task goes to `high_stakes` when its text contains a trigger word (default "重要", "important", "high-stakes"), or with `--profile high_stakes` / `EVALCTL_PROFILE`. The trigger words are in `~/.evalctl/settings.yaml`, with `default_agent` (the adapter `repeat` uses) and `contract_min_chars`. Order: `--profile`, `EVALCTL_PROFILE`, the profile the trigger word set for the task, `profile:` in `.evalctl.yaml`. `profiles:` in `.evalctl.yaml` can redefine both.
+
+Under a profile that requires repeat, a `check` the agent runs itself fails with one extra item, `repeat`, once everything else passes; it tells the agent to run `evalctl repeat` now.
+
 ## The outer loop: evalctl run
 
 The skill asks the agent to call `check` itself. `run` turns that around: evalctl calls the agent, judges the output, and feeds the failures back.
@@ -336,6 +419,8 @@ evalctl: round 2/3: calling claude (continuing the session)
 evalctl: round 2/3: check PASS
 evalctl run: PASS  (2 round(s))
 ```
+
+Before the first round the engine writes the acceptance contract from the task text (skipped, with a note, when no model is usable; the configured checks still run).
 
 Each round: call the agent, hash the working directory before and after to see what it produced (the agent is not asked), run `check`, and on failure send the failure list into the same session.
 
@@ -439,13 +524,13 @@ profiles:
   calibrate:   { judge_repeat: {n: 4, agree: 4, when: always} }
 ```
 
-The profile comes from `--profile`, then `$EVALCTL_PROFILE`, then `profile:` in the file. A profile overrides only the keys it names. An unknown profile name is an error, not a silent default. **Without a `loop` section every switch is off.** When a section is written but a key is left out: `lint.when` is `config_changed`, `judge_repeat` is `n: 3`, `when: final_round`, and `agree` is a majority. `loop.max_rounds` overrides the config's `max_rounds`.
+The profile comes from `--profile`, then `$EVALCTL_PROFILE`, then the profile a trigger word set for the task, then `profile:` in the file. `daily` and `high_stakes` are built in. A profile overrides only the keys it names. An unknown profile name is an error, not a silent default. **Without a `loop` section every switch is off.** When a section is written but a key is left out: `lint.when` is `config_changed`, `judge_repeat` is `n: 3`, `when: final_round`, and `agree` is a majority. `loop.max_rounds` overrides the config's `max_rounds`.
 
 **lint.** When the condition holds, `check` first lints the check config (next section). The result is cached by config hash, so `config_changed` pays for one review per config version. A blocking finding ends `check` with exit code 2 before any check runs, and the output says the problem is in the rules, not the output. Warnings add one line. A required lint that cannot run (no model) is exit code 2, never a silent skip. `block_on` is `critical`, `warning` or `never`.
 
 **judge_repeat.** Each `llm_rubric` criterion is graded n times and a verdict is adopted only when `agree` gradings say the same. Otherwise the criterion is **unstable**. With `unstable: exclude` it takes no part in the verdict and is not in the failure list the agent reads (one line says how many were left out); the names are in `--json`, `runs.sqlite` and the receipt. With `unstable: fail` it counts as failed. `when: always` grades n times every time. `final_round` grades once and tops up to n only when the result would be final: the first grading passed everything, or this is the last round. `calibrate_only` never repeats until a profile changes `when`. `evalctl stats` lists, per criterion, how well its repeated gradings agreed and how often it was unstable; a low figure usually means vague wording. `agree` must be more than half of n. `n: 3, agree: 2` is a majority vote and always reaches a verdict; to find vague criteria use a profile that demands unanimity.
 
-**repeat.** Only under `evalctl run`. After a pass, the task is run k more times from the same starting files, each in a temporary copy with a new session, and the runs are compared: `check_results` (same verdict per check) and `numbers` (same quantities in the output files; dates and times are not quantities). The receipt is written only when they agree. Otherwise there is no receipt and, with `on_disagree: escalate`, the run is marked `NEEDS HUMAN JUDGEMENT` with the differences listed (`fail` makes it a plain failure). The repeats are kept in `.eval/repeat/N/`. A `check` the agent runs through the skill cannot repeat: the switch is ignored, the output says so, and that receipt does not verify under a profile that requires repeat. Under `bench` each task already runs k times, so nothing is nested and pass^k is reported.
+**repeat.** This paragraph is about the repeat inside `evalctl run`; the `evalctl repeat` an agent calls in its own session is described under "Inside one prompt" and shares `repeat.k` and `when: on_pass`. After a pass, the task is run k more times from the same starting files, each in a temporary copy with a new session, and the runs are compared: `check_results` (same verdict per check) and `numbers` (same quantities in the output files; dates and times are not quantities). The receipt is written only when they agree. Otherwise there is no receipt and, with `on_disagree: escalate`, the run is marked `NEEDS HUMAN JUDGEMENT` with the differences listed (`fail` makes it a plain failure). The repeats are kept in `.eval/repeat/N/`. A `check` the agent runs through the skill asks for `evalctl repeat` once everything else passes, and writes the receipt after the reconciliation. Under `bench` each task already runs k times, so nothing is nested and pass^k is reported.
 
 ## lint: reviewing the check config itself
 
@@ -565,7 +650,7 @@ It shows two outputs of the same task (short files in full, long ones as a diff,
 
 ## The skill
 
-`skill/evalctl/SKILL.md` is the same for every workflow and every agent. It tells the agent to run `evalctl check` before delivering, fix only the failed items, stop after 3 rounds, report remaining failures as printed, and never touch `.eval/` or the configs.
+`skill/evalctl/SKILL.md` is the same for every workflow and every agent. It tells the agent to: write the contract first (`evalctl contract --task "<the request, word for word>"`, unless a hook already did); run `evalctl check` when done, fix only the failed items, at most 3 rounds, and report what still fails as printed; when `check` asks for it, run `evalctl repeat`, reconcile each difference from the original inputs in `.eval/reconcile.md`, write `needs_human` for what the inputs do not settle, and check again; deliver only with a receipt, stating how many contract items passed, how each difference was settled and what is left for you. It may not touch the contract, the receipt, `.evalctl.yaml` or `~/.evalctl/`, and with `EVALCTL_CHILD` set it must not start a repeat.
 
 | Agent | Install |
 | --- | --- |
@@ -576,7 +661,13 @@ It shows two outputs of the same task (short files in full, long ones as a diff,
 
 A skill can only ask. What makes skipping visible is the receipt: before you accept work from an agent without a hook, run `evalctl verify --dir <output dir>`.
 
-## The Claude Code Stop hook
+## The Claude Code hooks
+
+**UserPromptSubmit** (`hooks/evalctl_prompt_hook.py`) writes the acceptance contract from your own prompt. It acts when the session directory or a parent has a `.evalctl.yaml`, when the prompt contains a trigger word (which also selects `high_stakes`; no `.evalctl.yaml` needed), or when an earlier prompt of the session was gated. Otherwise it does nothing. A prompt shorter than `contract_min_chars` is a follow-up and adds no contract. It never blocks a prompt; it adds a short instruction to the context. Claude Code gives this event 30 seconds by default, so the hook only registers the task and stores the starting files, and the model call runs in a detached process that `evalctl check` waits for. Format per the [hooks reference](https://code.claude.com/docs/en/hooks) and confirmed on Claude Code 2.1.322: `prompt`, `session_id`, `cwd` on stdin; `{"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": "..."}}` on stdout; no matcher support.
+
+**Stop** (`hooks/evalctl_stop_hook.py`) gates a session whose directory has a `.evalctl.yaml` or an active acceptance contract (written by the prompt hook for this session, or by the agent through the skill within 12 hours). `verify` also requires that the contract exists, is unchanged and passed, and that a required repeat is in the receipt with its differences reconciled. `hooks/settings.example.json` has both hooks.
+
+### Stop hook details
 
 `hooks/evalctl_stop_hook.py` runs every time Claude wants to end its turn.
 
@@ -619,9 +710,21 @@ Things to know:
 - The hook hands `transcript_path` (the record of the session) to `evalctl check` as the trajectory, so `action_policy` checks run under the hook too.
 - When `evalctl run` drives Claude Code it sets `EVALCTL_HOOK=off` for it: the outer loop is the gate then, and the hook does not gate a second time.
 
+## improve: a manual, cross-task tool
+
+`improve` is part of no delivery flow and does nothing for the task in hand. It reads what many tasks left behind, proposes changes to a check config, and applies only what you approve.
+
+```bash
+evalctl improve forum_scrape             # list proposals, change nothing
+evalctl improve forum_scrape --apply     # ask about each, apply the approved ones
+evalctl improve forum_scrape --approve P1 P3
+```
+
+It proposes removing a check you overruled with `feedback --verdict good` twice or more, or that stored `explain` results blame for false positives; and removing a rubric criterion whose repeated gradings agree 75% of the time or less. Those can be applied here (the old config is kept as `<name>.yaml.bak`; comments in the YAML are not preserved). Everything else is advice naming a command: passing outputs you judged bad, the most common cause of failure, low agreement with your pairwise judgements, candidates waiting for `review`, lint findings.
+
 ## What the receipt does and does not prove
 
-`.eval/receipt.json` records the path, size and SHA-256 of every covered file, the config name, path and hash, the time, the round, a one-line result per check, the profile, the value of every loop switch (`switches`) and what each switch actually did (`ran`: which config hash was linted, n and the unstable criteria of the repeated grading, k and the outcome of the repeat runs). It is signed with HMAC-SHA256 using `~/.evalctl/key`.
+`.eval/receipt.json` records the path, size and SHA-256 of every covered file, the config name, path and hash, the time, the round, a one-line result per check (each acceptance contract item included), the hashes of the active contracts (`contracts`), the in-session repeat (`repeated`, `reconciled`, `divergences`, `needs_human`), the profile, the value of every loop switch (`switches`) and what each switch actually did (`ran`: which config hash was linted, n and the unstable criteria of the repeated grading, k and the outcome of the repeat runs). It is signed with HMAC-SHA256 using `~/.evalctl/key`.
 
 Besides the signature and the hashes, `verify` checks the switches against the loop settings and profile **in force now**: when they require lint, judge_repeat or repeat and the receipt has no matching record, the receipt is not valid.
 
@@ -638,6 +741,6 @@ uv venv && uv pip install -e ".[dev]"
 .venv/bin/python -m pytest
 ```
 
-245 tests cover every check type, config selection, exit codes, receipts and tampering, rounds, stats, the hook script driven with Stop-hook JSON, `learn` / `review` / `feedback` (draft + final, several finals, drafts from git), and the v0.6 parts: the outer loop, bench comparison, the loop switches, `lint`, `explain`, `action_policy` and `judge`. `run` and `bench` are tested with a scripted stand-in agent (`tests/fake_agent.py`) that prints trajectories in Claude Code or Codex format. Model-graded checks are tested against a local fake server that speaks the Anthropic and OpenAI wire formats, so the suite runs offline. To see the rubric judged by a real model, run `evalctl check` on `fixtures/forum_scrape/nav_body` and `fixtures/forum_scrape/good` with a judge configured.
+280 tests cover every check type, config selection, exit codes, receipts and tampering, rounds, stats, the hook script driven with Stop-hook JSON, `learn` / `review` / `feedback` (draft + final, several finals, drafts from git), acceptance contracts, the in-session repeat and reconciliation, both hooks, contract tampering, `improve`, and the v0.6 parts: the outer loop, bench comparison, the loop switches, `lint`, `explain`, `action_policy` and `judge`. `run` and `bench` are tested with a scripted stand-in agent (`tests/fake_agent.py`) that prints trajectories in Claude Code or Codex format. Model-graded checks are tested against a local fake server that speaks the Anthropic and OpenAI wire formats, so the suite runs offline. To see the rubric judged by a real model, run `evalctl check` on `fixtures/forum_scrape/nav_body` and `fixtures/forum_scrape/good` with a judge configured.
 
 `python3 fixtures/forum_scrape/build.py` regenerates the fixtures.

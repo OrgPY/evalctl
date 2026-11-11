@@ -34,7 +34,7 @@ state_file.write_text(json.dumps(state))
 session = a.resume or f"sess-{entry['run']}-{os.getpid()}"
 with open(a.plan + ".calls", "a") as f:
     f.write(json.dumps({"cwd": cwd, "resume": a.resume, "prompt": a.prompt, "session": session,
-                        "env": {k: os.environ.get(k) for k in ("EVALCTL_HOOK", "EVALCTL_OUTER", "EVALCTL_WORKER")}}) + "\n")
+                        "env": {k: os.environ.get(k) for k in ("EVALCTL_HOOK", "EVALCTL_OUTER", "EVALCTL_WORKER", "EVALCTL_CHILD")}}) + "\n")
 
 time.sleep(call.get("sleep", 0))
 events = []

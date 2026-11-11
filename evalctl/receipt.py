@@ -90,7 +90,7 @@ def _sign(body: Dict[str, Any], key: bytes) -> str:
 
 
 def write(workdir: Path, config: Config, results: List[Result], round_no: Optional[int],
-          loop: Any = None, ran: Optional[Dict[str, Any]] = None) -> Path:
+          loop: Any = None, ran: Optional[Dict[str, Any]] = None, extra: Optional[Dict[str, Any]] = None) -> Path:
     """`loop` is the resolved loop.Loop; `ran` records what each switch actually did:
     {"lint": {...} | None, "judge_repeat": {...} | None, "repeat": {...} | None}."""
     artifacts = hash_artifacts(workdir, config.artifacts)
@@ -114,6 +114,8 @@ def write(workdir: Path, config: Config, results: List[Result], round_no: Option
         "switches": loop.switches() if loop else None,
         "ran": ran or {},
     }
+    # contracts: [{hash, sha256, items}]; repeated: K; reconciled: bool; divergences / needs_human: counts
+    body.update(extra or {})
     body["signature"] = _sign(body, load_key())
     rp = paths.receipt_path(workdir)
     rp.parent.mkdir(parents=True, exist_ok=True)
@@ -163,15 +165,17 @@ def missing_switches(rec: Dict[str, Any], config: Optional[Config], loop: Any) -
                           else "records no repeated grading"))
     if loop.repeat_on:
         rp, want = ran.get("repeat") or {}, loop.repeat
-        if not rp.get("ran") or rp.get("k", 0) < want["k"] or not rp.get("agreed"):
+        settled = rp.get("agreed") or rp.get("reconcile_complete")
+        if not rp.get("ran") or rp.get("k", 0) < want["k"] or not settled:
             out.append(f"{who} requires repeat (k={want['k']}, when: on_pass), but the receipt records "
-                       + ("a repeat that did not agree" if rp.get("ran") and rp.get("k", 0) >= want["k"]
+                       + ("a repeat whose differences were not reconciled" if rp.get("ran") and rp.get("k", 0) >= want["k"]
                           else f"only k={rp.get('k')}" if rp.get("ran") else "no repeat run")
-                       + ". Repeat only runs under `evalctl run` or `evalctl bench`, not under a plain `evalctl check`")
+                       + ". Run `evalctl repeat` in the session (or use `evalctl run`), reconcile, and check again")
     return out
 
 
-def verify(workdir: Path, config: Optional[Config], loop: Any = None
+def verify(workdir: Path, config: Optional[Config], loop: Any = None,
+           contracts: Optional[List[Dict[str, Any]]] = None, contract_problem: Optional[str] = None
            ) -> Tuple[bool, List[str], Optional[Dict[str, Any]]]:
     """-> (valid, reasons it is not valid, receipt). `config` and `loop` are what is in force now."""
     rec = read(workdir)
@@ -208,4 +212,17 @@ def verify(workdir: Path, config: Optional[Config], loop: Any = None
         elif then[path] != now[path]:
             reasons.append(f"{path}: content changed since the receipt was written")
     reasons += missing_switches(rec, config, loop)
+    # the acceptance contracts in force now ([{hash, sha256}]) against the ones the receipt was written for
+    if contract_problem:
+        reasons.append(contract_problem)
+    elif contracts is not None:
+        then_c = {c["hash"]: c.get("sha256") for c in rec.get("contracts") or []}
+        for c in contracts:
+            if c["hash"] not in then_c:
+                reasons.append(f"an acceptance contract ({c['hash']}) is active for this task but the receipt does not cover it")
+            elif then_c[c["hash"]] != c["sha256"]:
+                reasons.append(f"acceptance contract {c['hash']} changed since the receipt was written")
+        for h in then_c:
+            if h not in {c["hash"] for c in contracts}:
+                reasons.append(f"the receipt was written for acceptance contract {h}, which is no longer the active one")
     return not reasons, reasons, rec

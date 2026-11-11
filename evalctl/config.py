@@ -59,7 +59,7 @@ class Config:
 
 def _load_yaml(path: Path) -> Any:
     try:
-        return yaml.safe_load(path.read_text(encoding="utf-8"))
+        return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     except yaml.YAMLError as e:
         raise ConfigError(f"{path}: invalid YAML: {e}")
     except OSError as e:
@@ -88,10 +88,12 @@ def pointer_data(pointer: Path) -> Dict[str, Any]:
     data = _load_yaml(pointer)
     if not isinstance(data, dict):
         raise ConfigError(f"{pointer}: expected a mapping with at least `config: <name>`")
-    unknown = set(data) - {"config", "inputs", "profile", "loop", "profiles"}
+    unknown = set(data) - {"config", "inputs", "profile", "loop", "profiles", "contract"}
     if unknown:
         raise ConfigError(f"{pointer}: unknown key(s): {', '.join(sorted(unknown))} "
-                          "(allowed: config, inputs, profile, loop, profiles)")
+                          "(allowed: config, inputs, profile, loop, profiles, contract)")
+    if data.get("contract", "auto") not in ("auto", "required", "off"):
+        raise ConfigError(f"{pointer}: `contract` must be auto, required or off")
     return data
 
 

@@ -31,6 +31,12 @@ REPEAT_WHEN = ("never", "on_pass")
 COMPARE = ("numbers", "check_results")
 ON_DISAGREE = ("escalate", "fail")
 
+# Profiles every directory has, with or without a .evalctl.yaml. `profiles:` there can redefine them.
+BUILTIN_PROFILES: Dict[str, Any] = {
+    "daily": {},                                                  # contract + check
+    "high_stakes": {"repeat": {"when": "on_pass", "k": 3}},       # plus independent repeats and reconciliation
+}
+
 OFF: Dict[str, Any] = {
     "max_rounds": None,
     "lint": {"when": "never", "block_on": "critical"},
@@ -142,6 +148,7 @@ def resolve(pointer_data: Optional[Dict[str, Any]], profile_arg: Optional[str] =
     profiles = data.get("profiles") or {}
     if not isinstance(profiles, dict):
         raise ConfigError(f"{where}: `profiles` must be a mapping of profile name -> overrides")
+    profiles = {**BUILTIN_PROFILES, **profiles}
     own = data.get("profile")
     if own is not None and not isinstance(own, str):
         raise ConfigError(f"{where}: `profile` must be a name")
@@ -149,7 +156,7 @@ def resolve(pointer_data: Optional[Dict[str, Any]], profile_arg: Optional[str] =
     agree_given = "agree" in ((data.get("loop") or {}).get("judge_repeat") or {})
     if name:
         if name in profiles:
-            base = _merge(base, profiles[name], f"{where}: profiles.{name}", seen)
+            base = _merge(base, profiles[name] or None, f"{where}: profiles.{name}", seen)
             over = (profiles[name] or {}).get("judge_repeat") or {}
             if "agree" in over:
                 agree_given = True

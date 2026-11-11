@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from . import config as cfg, loop as lp, receipt, report, store
+from . import config as cfg, contract as ct, loop as lp, paths, receipt, report, store
 from .checks import ERROR, FAIL, PASS, REGISTRY, SKIPPED, SOFT_TYPES, Context, Result
 from .config import ConfigError
 from .judge import JudgeError, detect_worker
@@ -36,6 +36,7 @@ class Outcome:
     ran: Dict[str, Any] = field(default_factory=dict)
     inputs: Optional[Path] = None
     worker: Optional[str] = None
+    extra: Dict[str, Any] = field(default_factory=dict)
 
     @property
     def passed(self) -> bool:
@@ -136,16 +137,107 @@ def env_trajectories(args: Optional[List[str]]) -> List[Path]:
     return out
 
 
+def resolve_target(dir_arg: Optional[str], config_arg: Optional[str]) -> Tuple[Path, Optional[Path], Optional[Path]]:
+    """-> (workdir, config path or None, pointer or None). A directory needs no check config when an
+    acceptance contract is active for it: the contract is then all there is to check."""
+    start = Path(dir_arg).expanduser() if dir_arg else Path.cwd()
+    if not start.is_dir():
+        raise ConfigError(f"not a directory: {start}")
+    start = start.resolve()
+    pointer = cfg.find_pointer(start)
+    workdir = start if (dir_arg or pointer is None) else pointer.parent
+    if config_arg:
+        return workdir, cfg.resolve_config_path(config_arg), pointer
+    name = cfg.pointer_data(pointer).get("config") if pointer else None
+    if name is not None and (not isinstance(name, str) or not name.strip()):
+        raise ConfigError(f"{pointer}: `config` must be the name of a check config")
+    return workdir, cfg.resolve_config_path(name.strip()) if name else None, pointer
+
+
+def contract_only_config(hashes: List[str]) -> cfg.Config:
+    """Stands in for a check config when only the acceptance contract is checked."""
+    import hashlib
+    h = hashlib.sha256("".join(ct.file_sha(x) for x in hashes).encode()).hexdigest()
+    return cfg.Config(name="contract", path=ct.contract_path(hashes[0]), sha256=h,
+                      hashed_files=[str(ct.contract_path(x)) for x in hashes], checks=[])
+
+
+def load_target(dir_arg: Optional[str], config_arg: Optional[str], profile_arg: Optional[str], worker_arg: Optional[str],
+                wait: bool = True) -> Dict[str, Any]:
+    """Everything `check` and `verify` need to know about a directory. Raises ConfigError."""
+    workdir, cpath, pointer = resolve_target(dir_arg, config_arg)
+    pdata = cfg.pointer_data(pointer) if pointer else {}
+    mode = pdata.get("contract", "auto")
+    state = None
+    if mode != "off" and ct.has_state(workdir):
+        state = ct.load_state(workdir)
+        if wait and state and state.get("pending"):
+            state = ct.wait_pending(workdir, detect_worker(worker_arg, None))
+    hashes = list((state or {}).get("contracts") or [])
+    if cpath is None and not hashes:
+        failed = (state or {}).get("errors") or {}
+        raise ConfigError(cfg.HOW_TO_CONFIGURE.format(dir=workdir, checks_dir=paths.checks_dir(), available=cfg._available())
+                          + "\n\nOr, for a one-off task without a check config, write an acceptance contract from "
+                            "the task itself:  evalctl contract --task \"<the request, word for word>\""
+                          + ("\n\nAn acceptance contract for this task was attempted and could not be written:\n"
+                             + "\n".join(str(v) for v in failed.values()) if failed else ""))
+    if mode == "required" and not hashes:
+        raise ConfigError(f"{pointer} says `contract: required`, but no acceptance contract is active for {workdir}. "
+                          "Run: evalctl contract --task \"<the request, word for word>\"")
+    conf = cfg.load(cpath, workdir) if cpath else contract_only_config(hashes)
+    contracts = [ct.load_contract(h) for h in hashes]
+    profile = profile_arg or os.environ.get("EVALCTL_PROFILE") or (state or {}).get("profile")
+    loop = lp.from_pointer(pointer, profile) if pointer else lp.resolve(None, profile)
+    return {"workdir": workdir, "cpath": cpath, "pointer": pointer, "conf": conf, "loop": loop, "state": state,
+            "contracts": contracts}
+
+
+def _repeat_step(workdir: Path, loop: lp.Loop, state: Optional[Dict[str, Any]], status: str,
+                 results: List[Result]) -> Tuple[Optional[Dict[str, Any]], List[Result]]:
+    """In the agent's own session: is the repeat the profile asks for done, and are its differences settled?"""
+    from . import reconcile
+    rec = (state or {}).get("repeat")
+    extra: List[Result] = []
+    if rec is None:
+        if loop.repeat_on and status == PASS:
+            k = loop.repeat["k"]
+            extra.append(Result("repeat", "loop", FAIL, f"required (k={k}) and not run yet", [
+                f"everything above passes, but this task runs under profile '{loop.profile or 'with repeat'}', which asks for "
+                f"{k} independent repeats before delivery. Run `evalctl repeat -k {k}` now (it takes several minutes; "
+                "let it finish), reconcile the differences it reports, then run `evalctl check` again"]))
+        return None, extra
+    divergences = rec.get("divergences") or []
+    known = [f["path"] for f in receipt.hash_artifacts(workdir, None)] + list(((state or {}).get("baseline") or {}).get("manifest") or {})
+    problems, summary = reconcile.review(workdir, divergences, known)
+    if divergences:
+        extra.append(Result("reconcile", "loop", FAIL if problems else PASS,
+                            f"{len(problems)} problem(s) in .eval/reconcile.md" if problems else
+                            f"{summary['resolved']} of {len(divergences)} difference(s) settled with evidence"
+                            + (f", {len(summary['needs_human'])} left for the user" if summary["needs_human"] else ""),
+                            problems,
+                            "Go back to the original inputs for each difference. Do not pick a value because more "
+                            "runs had it; cite where the inputs show it. What the inputs do not settle is `needs_human:`."
+                            if problems else None))
+    ran = {"ran": True, "k": rec.get("k"), "agreed": not divergences, "divergences": len(divergences),
+           "reconcile_complete": not problems, "resolved": summary["resolved"], "needs_human": summary["needs_human"],
+           "runs_passed": rec.get("runs_passed"), "in_session": True}
+    return ran, extra
+
+
 def check(dir_arg: Optional[str], config_arg: Optional[str] = None, *, inputs_arg: Optional[str] = None,
           worker_arg: Optional[str] = None, profile_arg: Optional[str] = None, source: str = "cli",
           mode: str = "skill", agent: Optional[str] = None, trajectories: Optional[List[Path]] = None,
           task: Optional[Tuple[int, int]] = None, defer_receipt: bool = False, record: bool = True,
-          max_rounds: Optional[int] = None) -> Outcome:
+          max_rounds: Optional[int] = None, session_repeat: Optional[bool] = None) -> Outcome:
     """`task` = (task_id, round) when the caller counts rounds itself (run / bench).
-    `defer_receipt`: do not write the receipt on a pass; the caller does, via write_receipt()."""
+    `defer_receipt`: do not write the receipt on a pass; the caller does, via write_receipt().
+    `session_repeat`: apply the in-session repeat / reconcile step (default: only when the agent
+    itself called check, and not inside a repeat's child run)."""
     started = time.time()
     inner = mode == "skill" and bool(os.environ.get("EVALCTL_OUTER"))  # the agent ran check inside `evalctl run`
     record = record and not inner
+    if session_repeat is None:
+        session_repeat = mode == "skill" and not inner and not os.environ.get("EVALCTL_CHILD")
 
     def log_error(message: str, workdir: Optional[Path], name: str) -> None:
         if record and workdir is not None:
@@ -157,23 +249,23 @@ def check(dir_arg: Optional[str], config_arg: Optional[str] = None, *, inputs_ar
                 pass
 
     try:
-        workdir, cpath, pointer = cfg.select(dir_arg, config_arg)
+        workdir, cpath, pointer = resolve_target(dir_arg, config_arg)
     except ConfigError as e:
         return _error(str(e))
     try:
-        conf = cfg.load(cpath, workdir)
+        t = load_target(dir_arg, config_arg, profile_arg, worker_arg)
+        conf, loop, state, contracts = t["conf"], t["loop"], t["state"], t["contracts"]
         inputs = cfg.resolve_inputs(inputs_arg, pointer)
-        loop = lp.from_pointer(pointer, profile_arg)
         trajectories = list(trajectories) if trajectories is not None else env_trajectories(None)
     except ConfigError as e:
-        log_error(str(e), workdir, cpath.stem)
+        log_error(str(e), workdir, cpath.stem if cpath else "contract")
         return _error(str(e), workdir=workdir)
     conf.max_rounds = max_rounds or loop.max_rounds or conf.max_rounds
     worker = detect_worker(worker_arg, conf.worker_family)
     ran: Dict[str, Any] = {"lint": None, "judge_repeat": None, "repeat": None}
     notes: List[str] = []
 
-    if loop.lint_on:
+    if loop.lint_on and cpath is not None:
         from . import lint
         try:
             found = lint.run(conf, worker=worker, refresh=loop.lint["when"] == "always")
@@ -203,24 +295,44 @@ def check(dir_arg: Optional[str], config_arg: Optional[str] = None, *, inputs_ar
 
     results, did = run_checks(conf, workdir, worker, inputs, loop, round_no, trajectories)
     ran["judge_repeat"] = did["judge_repeat"]
+    if contracts:  # the acceptance contract of the task in hand, on top of the configured checks
+        hard_ok = not any(r.status in (FAIL, ERROR) for r in results)
+        results += ct.verify(contracts, workdir, state, inputs, worker, hard_ok, conf.judge)
     status = report.overall(results)
+    if session_repeat:
+        ran["repeat"], more = _repeat_step(workdir, loop, state, status, results)
+        results += more
+        status = report.overall(results)
     unstable = (ran["judge_repeat"] or {}).get("unstable") or []
     if unstable and loop.judge_repeat["unstable"] == "exclude":
         notes.append(f"{len(unstable)} rubric item(s) had no stable verdict across "
                      f"{loop.judge_repeat['n']} gradings and were left out of the verdict "
                      "(nothing to fix; reported to the user in `evalctl stats`)")
-    if loop.repeat_on and mode == "skill":
-        notes.append(f"the loop settings ask for repeat (k={loop.repeat['k']}, when: on_pass). Repeat only runs "
-                     "under `evalctl run` and `evalctl bench`; it was ignored here, so `evalctl verify` "
-                     "will not accept a receipt from this check")
+    rp = ran["repeat"] or {}
+    if rp.get("needs_human"):
+        notes.append(f"{len(rp['needs_human'])} difference(s) between the repeat runs are left for the user "
+                     f"({', '.join(rp['needs_human'])}). Report them with the delivery, exactly as written in .eval/reconcile.md")
     if inner:
         notes.append("an outer `evalctl run` is driving this session: this check wrote no receipt and no "
                      "log entry. The outer loop checks again when you stop")
+    if contracts:
+        n_items = sum(len(c["items"]) for c in contracts)
+        n_pass = sum(1 for r in results if r.type == "contract" and r.status == PASS)
+        loose = [r.id for r in results if r.type == "contract" and r.status == PASS and (r.meta or {}).get("unverified")]
+        notes.append(f"acceptance contract: {n_pass} of {n_items} item(s) passed"
+                     + ("" if cpath else " (no check config for this directory: the contract is all that is checked)"))
+        if loose:
+            notes.append(f"{len(loose)} contract item(s) were delivered but could not be cross-checked against any source "
+                         f"file ({', '.join(loose)}). Tell the user these are unverified")
 
+    extra = {"contracts": [{"hash": c["hash"], "sha256": ct.file_sha(c["hash"]), "items": len(c["items"])} for c in contracts]}
+    if rp.get("ran"):
+        extra.update(repeated=rp["k"], reconciled=bool(rp["reconcile_complete"] and not rp["needs_human"]),
+                     divergences=rp["divergences"], needs_human=len(rp["needs_human"]))
     receipt_file = None
     if status == PASS and not defer_receipt and not inner:
         try:
-            receipt_file = str(receipt.write(workdir, conf, results, round_no, loop, ran))
+            receipt_file = str(receipt.write(workdir, conf, results, round_no, loop, ran, extra))
         except ConfigError as e:
             results.append(Result("receipt", "receipt", ERROR, str(e), [str(e)]))
             status = ERROR
@@ -235,24 +347,24 @@ def check(dir_arg: Optional[str], config_arg: Optional[str] = None, *, inputs_ar
             None if is_error else round_no, status, source, worker, time.time() - started,
             [r.to_dict() for r in results], agent=agent or os.environ.get("EVALCTL_AGENT"),
             trajectory=os.pathsep.join(str(t) for t in trajectories) or None, profile=loop.profile, mode=mode,
-            extra={"switches": loop.switches(), "ran": ran, "unstable": unstable})
+            extra={"switches": loop.switches(), "ran": ran, "unstable": unstable, **extra})
 
     shown_round = None if is_error else round_no
     text = report.render_text(conf, workdir, results, status, shown_round, receipt_file, mode, notes, run_id,
                               receipt_expected=not (defer_receipt or inner))
     data = report.to_json(conf, workdir, results, status, shown_round, receipt_file, text,
                           run_id=run_id, profile=loop.profile, switches=loop.switches(), ran=ran,
-                          unstable=unstable, notes=notes)
+                          unstable=unstable, notes=notes, **extra)
     return Outcome(status=status, text=text, data=data, results=results, conf=conf, workdir=workdir, loop=loop,
                    round_no=shown_round, task_id=task_id, run_id=run_id, receipt=receipt_file, ran=ran,
-                   inputs=inputs, worker=worker)
+                   inputs=inputs, worker=worker, extra=extra)
 
 
 def write_receipt(outcome: Outcome, repeat: Dict[str, Any]) -> str:
     """Write the receipt of a deferred pass once the repeat runs agreed."""
     outcome.ran["repeat"] = repeat
     path = str(receipt.write(outcome.workdir, outcome.conf, outcome.results, outcome.round_no,
-                             outcome.loop, outcome.ran))
+                             outcome.loop, outcome.ran, outcome.extra))
     outcome.receipt = path
     outcome.data["receipt"] = path
     outcome.data["ran"] = outcome.ran

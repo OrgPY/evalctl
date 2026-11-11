@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 from typing import List, Optional
 
-from . import __version__, config as cfg, engine, loop as lp, receipt, store
+from . import __version__, config as cfg, engine, loop as lp, paths, receipt, store
 from .checks import ERROR
 from .config import ConfigError
 
@@ -40,6 +40,8 @@ def cmd_check(args: argparse.Namespace) -> int:
 
 
 def cmd_verify(args: argparse.Namespace) -> int:
+    from . import contract as ct
+    conf = loop = contracts = problem = None
     try:
         start = Path(args.dir).expanduser() if args.dir else Path.cwd()
         if not start.is_dir():
@@ -47,21 +49,34 @@ def cmd_verify(args: argparse.Namespace) -> int:
         start = start.resolve()
         pointer = cfg.find_pointer(start)
         workdir = start if (args.dir or pointer is None) else pointer.parent
-        if args.config or pointer is not None:
-            _, cpath, _ = cfg.select(args.dir, args.config)
+        gated = args.config or pointer is not None or ct.has_state(workdir)
+        if gated:
+            try:
+                t = engine.load_target(args.dir, args.config, args.profile, None, wait=False)
+                conf, loop = t["conf"], t["loop"]
+                contracts = [{"hash": c["hash"], "sha256": ct.file_sha(c["hash"])} for c in t["contracts"]]
+                pending = (t["state"] or {}).get("pending")
+                if pending:
+                    problem = "the acceptance contract for the current task is still being written; run `evalctl check`"
+            except ConfigError as e:
+                if not ct.has_state(workdir):
+                    raise
+                problem = str(e)   # a contract that was tampered with, or could not be written
+                loop = lp.from_pointer(pointer, args.profile) if pointer else None
         else:
-            # No pointer: fall back to the config the receipt itself names.
+            # Nothing says what this directory is checked against: fall back to the config the receipt names.
             rec = receipt.read(workdir) or {}
             recorded = (rec.get("config") or {}).get("path")
             cpath = Path(recorded) if recorded else None
             if cpath is not None and not cpath.is_file():
                 raise ConfigError(f"the receipt names check config {cpath}, which no longer exists")
-        conf = cfg.load(cpath, workdir) if cpath else None
-        loop = lp.from_pointer(pointer, args.profile)
+            conf = cfg.load(cpath, workdir) if cpath and paths.home() / "contracts" not in cpath.parents else None
+            if rec.get("contracts"):
+                contracts = []   # the receipt was written against a contract that is no longer active here
     except ConfigError as e:
         return _config_error(args, str(e))
 
-    valid, reasons, rec = receipt.verify(workdir, conf, loop)
+    valid, reasons, rec = receipt.verify(workdir, conf, loop, contracts, problem)
     if args.json:
         print(json.dumps({"valid": valid, "dir": str(workdir), "reasons": reasons, "receipt": rec},
                          ensure_ascii=False, indent=2))
@@ -69,6 +84,11 @@ def cmd_verify(args: argparse.Namespace) -> int:
         rc = rec["config"]
         print(f"evalctl verify: VALID\n{workdir}: {len(rec['artifacts'])} file(s) unchanged since they "
               f"passed '{rc['name']}' at {rec['passed_at']}")
+        if rec.get("contracts"):
+            print(f"acceptance contract: {sum(c['items'] for c in rec['contracts'])} item(s), all passed")
+        if rec.get("repeated"):
+            print(f"repeated: {rec['repeated']}   reconciled: {str(rec['reconciled']).lower()}   "
+                  f"differences: {rec['divergences']}   left for you: {rec['needs_human']}")
     else:
         print("evalctl verify: INVALID\n" + "\n".join(f"  - {r}" for r in reasons)
               + "\nRun `evalctl check` to get a fresh receipt.")

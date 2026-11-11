@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from typing import Any
 
@@ -181,7 +182,210 @@ def cmd_judge(args: argparse.Namespace) -> int:
     return 0
 
 
+def _task_text(value: str) -> str:
+    """--task takes the text itself, a file holding it, or - for stdin."""
+    from pathlib import Path
+    if value == "-":
+        text = sys.stdin.read()
+    else:
+        p = Path(value).expanduser()
+        try:
+            is_file = len(value) < 1000 and "\n" not in value and p.is_file()
+        except OSError:
+            is_file = False
+        text = p.read_text(encoding="utf-8") if is_file else value
+    if not text.strip():
+        raise ConfigError("--task is empty")
+    return text
+
+
+def render_contract(body: dict, state: dict, workdir: Any) -> str:
+    lines = [f"evalctl contract: {len(body['items'])} acceptance item(s) for {workdir}",
+             f"written by: {body['model']}   contract: {body['hash']}"
+             + (f"   profile for this task: {state['profile']}" if state.get("profile") else ""), ""]
+    for i in body["items"]:
+        lines.append(f"[{i['kind']}] {i['id']}: {i['text']}")
+        lines.append(f"    passes when: {i['pass']}")
+        lines.append(f"    fails when:  {i['fail']}")
+    n = len(state.get("contracts", []))
+    lines += ["", ("This task has " + str(n) + " contracts active (earlier requests of the same task still count). " if n > 1 else "")
+              + "`evalctl check` verifies every item when the work is done. The contract is stored outside this "
+              "directory and signed; it cannot be edited."]
+    return "\n".join(lines)
+
+
+def cmd_contract(args: argparse.Namespace) -> int:
+    from pathlib import Path
+    from . import contract as ct, settings
+    from .judge import detect_worker
+    d = Path(args.dir).expanduser() if args.dir else Path.cwd()
+    if not d.is_dir():
+        raise ConfigError(f"not a directory: {d}")
+    workdir = d.resolve()
+    worker = detect_worker(args.worker, None)
+    if args.clear:
+        ct.clear_state(workdir)
+        print(f"evalctl contract: no contract is active for {workdir} any more.")
+        return 0
+    if args.complete:   # the detached half of --background
+        ct.complete(workdir, args.complete, worker)
+        return 0
+    if not args.task:
+        state = ct.load_state(workdir)
+        if not state or not (state.get("contracts") or state.get("pending")):
+            print(f"No acceptance contract is active for {workdir}.\n"
+                  "Write one from the task:  evalctl contract --task \"<the request, word for word>\"")
+            return 1
+        if args.json:
+            print(json.dumps({"state": state, "contracts": [ct.load_contract(h) for h in state["contracts"]]}, ensure_ascii=False, indent=2))
+            return 0
+        for h in state["contracts"]:
+            print(render_contract(ct.load_contract(h), state, workdir) + "\n")
+        if state.get("pending"):
+            print(f"{len(state['pending'])} contract(s) are still being written.")
+        return 0
+    task = _task_text(args.task)
+    conf = settings.load(create=True)
+    profile = args.profile or ct.pick_profile(task, conf["triggers"])
+    if args.hook:   # called by the Claude Code prompt hook: decide here whether this prompt is gated at all
+        from . import config as cfg, loop as lp
+        pointer = cfg.find_pointer(workdir)
+        pdata = cfg.pointer_data(pointer) if pointer else {}
+        workdir = pointer.parent if pointer else workdir
+        try:
+            state = ct.load_state(workdir)
+        except ConfigError:
+            state = None
+        same = bool(state) and state.get("session") == args.session and bool(args.session)
+        if not (pointer or profile or same):
+            print(json.dumps({"gated": False}))
+            return 0
+        wants = pdata.get("contract", "auto") != "off" and len(task.strip()) >= int(conf["contract_min_chars"]) \
+            and not task.lstrip().startswith("/")
+        if wants:
+            state, h = ct.start(workdir, task, source="hook", session=args.session, profile=profile)
+            if ct.contract_path(h).is_file():
+                ct.complete(workdir, h, worker)
+            else:
+                ct.spawn_background(workdir, h, worker)
+        name = profile or (state or {}).get("profile")
+        loop = lp.from_pointer(pointer, name) if pointer else lp.resolve(None, name)
+        print(json.dumps({"gated": True, "dir": str(workdir), "contract": wants, "profile": loop.profile,
+                          "repeat": loop.repeat["k"] if loop.repeat_on else None}))
+        return 0
+    if os.environ.get("EVALCTL_CHILD") or os.environ.get("EVALCTL_OUTER"):
+        # A run started by evalctl already has its contract; the agent inside cannot swap it.
+        state = ct.load_state(workdir)
+        print("evalctl contract: this session was started by evalctl, which already wrote the acceptance contract "
+              f"({len((state or {}).get('contracts', []))} active). Nothing to do; carry on with the task.")
+        return 0
+    if args.new and os.environ.get("CLAUDECODE") and (ct.load_state(workdir) or {}).get("source") == "hook":
+        raise ConfigError("--new would replace the acceptance contract that was written from the user's own prompt. "
+                          "Only the user can do that, from their own terminal.")
+    state, h = ct.start(workdir, task, source=args.source, session=args.session, profile=profile, new=args.new)
+    if args.background:
+        if not ct.contract_path(h).is_file():
+            ct.spawn_background(workdir, h, worker)
+        else:
+            ct.complete(workdir, h, worker)
+        print(json.dumps({"hash": h, "profile": state.get("profile"), "pending": True}) if args.json
+              else f"evalctl contract: being written in the background ({h}).")
+        return 0
+    body = ct.complete(workdir, h, worker)
+    state = ct.load_state(workdir) or state
+    print(json.dumps({"contract": body, "profile": state.get("profile"), "active": state["contracts"]}, ensure_ascii=False, indent=2)
+          if args.json else render_contract(body, state, workdir))
+    return 0
+
+
+def cmd_repeat(args: argparse.Namespace) -> int:
+    from . import sessionrepeat as sr
+    k = args.k
+    if k is None:   # the profile of the task in hand says how many
+        from . import engine
+        try:
+            k = engine.load_target(args.dir, None, args.profile, None)["loop"].repeat["k"]
+        except ConfigError:
+            k = 3
+    report = sr.repeat(args.dir, k, args.agent, _task_text(args.task) if args.task else None, args.profile, _say(args))
+    print(json.dumps(report, ensure_ascii=False, indent=2) if args.json else report["text"])
+    return 0
+
+
+def cmd_improve(args: argparse.Namespace) -> int:
+    from . import improve as im
+    name = args.config
+    if not (args.apply or args.approve):
+        proposals = im.propose(name)
+        im.save(name, proposals)
+        print(json.dumps(proposals, ensure_ascii=False, indent=2) if args.json else im.render(name, proposals))
+        return 0
+    proposals = im.load(name)
+    doable = [p for p in proposals if p["action"] != "advice" and p["status"] == "pending"]
+    chosen = []
+    if args.approve:
+        unknown = set(args.approve) - {p["id"] for p in doable}
+        if unknown:
+            raise ConfigError(f"not a pending proposal that can be applied: {', '.join(sorted(unknown))}")
+        chosen = [p for p in doable if p["id"] in args.approve]
+    else:
+        try:
+            for p in doable:
+                print(f"{p['id']}  {p['action'].replace('_', ' ')} {p['target']}\n    why: {p['why']}")
+                a = input("  apply? [y/N/q] > ").strip().lower()
+                if a == "q":
+                    break
+                p["status"] = "approved" if a == "y" else "rejected"
+                if a == "y":
+                    chosen.append(p)
+        except EOFError:
+            print("\nNo answer (input closed). Use --approve ID to apply without prompting.")
+            return 1
+    for p in chosen:
+        p["status"] = "approved"
+    if chosen:
+        backup = im.apply(name, chosen)
+        print(f"Applied {len(chosen)} change(s) to config '{name}': {', '.join(p['id'] for p in chosen)}. "
+              f"Previous version: {backup}\nReview the result: evalctl lint {name}")
+    else:
+        print("Nothing was applied.")
+    im.save(name, proposals)
+    return 0
+
+
 def add_parsers(sub: Any) -> None:
+    im = sub.add_parser("improve", help="manual: propose changes to a check config from the record of many tasks; apply what you approve")
+    im.add_argument("config")
+    im.add_argument("--apply", action="store_true", help="go through the stored proposals and apply the ones you approve")
+    im.add_argument("--approve", nargs="+", metavar="ID", help="apply these proposals without prompting")
+    im.add_argument("--json", action="store_true")
+    im.set_defaults(fn=cmd_improve)
+
+    c = sub.add_parser("contract", help="write the acceptance contract for a task from the request itself; or show the active one")
+    c.add_argument("--task", help="the user's request, word for word: the text, a file holding it, or - for stdin")
+    c.add_argument("--dir", help="the directory the work happens in (default: cwd)")
+    c.add_argument("--profile", help="profile for this task (default: by trigger word in the task, see ~/.evalctl/settings.yaml)")
+    c.add_argument("--new", action="store_true", help="start a new task: forget the contracts and the starting files of the previous one")
+    c.add_argument("--clear", action="store_true", help="remove the active contract and the stored starting files")
+    c.add_argument("--worker", help="model family doing the work; the contract is written by another one")
+    c.add_argument("--background", action="store_true", help=argparse.SUPPRESS)
+    c.add_argument("--hook", action="store_true", help=argparse.SUPPRESS)
+    c.add_argument("--complete", metavar="HASH", help=argparse.SUPPRESS)
+    c.add_argument("--source", default="cli", choices=["cli", "hook"], help=argparse.SUPPRESS)
+    c.add_argument("--session", help=argparse.SUPPRESS)
+    c.add_argument("--json", action="store_true")
+    c.set_defaults(fn=cmd_contract)
+
+    rp = sub.add_parser("repeat", help="in your session: K independent runs of the task in copies of the starting files, "
+                                       "and the differences from your output")
+    rp.add_argument("--task", help="the task text or a file holding it (default: the task of the active contract)")
+    rp.add_argument("-k", type=int, help="number of independent runs (default: the profile's repeat.k, else 3)")
+    rp.add_argument("--agent", help="agent adapter for the runs (default: the calling agent; `default_agent` in settings.yaml)")
+    rp.add_argument("--dir")
+    rp.add_argument("--profile")
+    rp.add_argument("--json", action="store_true")
+    rp.set_defaults(fn=cmd_repeat)
+
     j = sub.add_parser("judge", help="compare two outputs of the same task yourself: pick the better one and say why")
     j.add_argument("dirs", nargs="*", metavar="DIR", help="the two output directories, A then B")
     j.add_argument("--config", help="check config the outputs belong to (default: from .evalctl.yaml in A or B)")
